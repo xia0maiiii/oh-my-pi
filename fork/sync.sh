@@ -33,11 +33,18 @@ echo ">> fetching upstream tags..."
 # rebase onto it, the content is captured in our history regardless of later moves.
 git fetch upstream --tags --force --quiet
 
-# Target tag: argument, or the newest v* tag.
-target="${1:-$(git tag --list 'v*' --sort=-v:refname | head -1)}"
+# Target tag: argument, or the newest v* tag. Read the full list and take the
+# first line WITHOUT piping to head: under `set -o pipefail`, `git tag | head`
+# can die with SIGPIPE (exit 141) once the tag list is large.
+if [ -n "${1:-}" ]; then
+	target="$1"
+else
+	_tags="$(git tag --list 'v*' --sort=-v:refname)"
+	target="${_tags%%$'\n'*}"
+fi
 if ! git rev-parse -q --verify "refs/tags/${target}" >/dev/null; then
 	echo "ERROR: tag '${target}' not found (did you mean one of:?)" >&2
-	git tag --list 'v*' --sort=-v:refname | head -5 >&2
+	git tag --list 'v*' --sort=-v:refname 2>/dev/null | head -5 >&2 || true
 	exit 1
 fi
 

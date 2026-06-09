@@ -47,7 +47,13 @@ jobs:
           # upstream re-cuts recent tags, so --force (see FORK.md).
           git fetch upstream --tags --force --quiet
 
-          target="${TAG_INPUT:-$(git tag --list 'v*' --sort=-v:refname | head -1)}"
+          # take newest tag without `| head` (SIGPIPE under pipefail on large tag lists)
+          if [ -n "${TAG_INPUT:-}" ]; then
+            target="$TAG_INPUT"
+          else
+            _tags="$(git tag --list 'v*' --sort=-v:refname)"
+            target="${_tags%%$'\n'*}"
+          fi
           if ! git rev-parse -q --verify "refs/tags/${target}" >/dev/null; then
             echo "tag ${target} not found" >&2; exit 1
           fi
