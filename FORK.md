@@ -107,10 +107,15 @@ _(append one row per Tier-1/Tier-2 patch as you add it)_
 
 ## Sync SOP — rebase our series onto an upstream release tag
 
-`main` = `<upstream tag>` + our patch series (today: 2 commits on `v15.10.4`).
-`git rebase v<new> main` replays exactly our commits onto the new tag; `rerere` auto-applies
-recurring resolutions. Pin to **release tags**, never `upstream/main` (it moves dozens of
-times a day).
+`main` = `<upstream tag>` + our patch series. `git rebase v<new> main` replays exactly our
+commits onto the new tag; `rerere` auto-applies recurring resolutions. Pin to **release tags**,
+never `upstream/main` (it moves dozens of times a day).
+
+> **Tags here are mutable.** Upstream's release automation force-moves the latest patch tag
+> (we observed `v15.10.8` move `74d4f009`→`c69ba70a`). `fork/sync.sh` force-fetches tags to
+> follow that; once you've rebased onto a tag its content is captured in your history, so a
+> later move can't alter what you already synced. The script prints the resolved SHA — record
+> it in the ledger as the stable reference.
 
 ```sh
 fork/sync.sh                 # rebase onto the newest upstream tag

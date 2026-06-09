@@ -28,7 +28,10 @@ if ! git diff-index --quiet HEAD --; then
 fi
 
 echo ">> fetching upstream tags..."
-git fetch upstream --tags --quiet
+# upstream's release automation force-moves recent tags, so a plain fetch aborts
+# with "would clobber existing tag". --force makes us track the moved tag; once we
+# rebase onto it, the content is captured in our history regardless of later moves.
+git fetch upstream --tags --force --quiet
 
 # Target tag: argument, or the newest v* tag.
 target="${1:-$(git tag --list 'v*' --sort=-v:refname | head -1)}"
@@ -40,8 +43,9 @@ fi
 
 base="$(git merge-base HEAD "$target")"
 base_desc="$(git describe --tags --abbrev=0 "$base" 2>/dev/null || git rev-parse --short "$base")"
+target_sha="$(git rev-parse --short "$target")"
 echo ">> current base: ${base_desc}"
-echo ">> target tag:   ${target}"
+echo ">> target tag:   ${target} (${target_sha} — record this; the tag may move)"
 
 # Already up to date?
 if git merge-base --is-ancestor "$target" HEAD; then
@@ -71,7 +75,7 @@ echo ""
 if git rebase "$target"; then
 	echo ""
 	echo "==================================================================="
-	echo "== REBASE OK -> main is now on ${target}"
+	echo "== REBASE OK -> main is now on ${target} (${target_sha})"
 	echo "==================================================================="
 	[ -n "$rust_changed" ] && echo "  REQUIRED: bun run build:native   (the range changed crates/)"
 	cat <<EOF
