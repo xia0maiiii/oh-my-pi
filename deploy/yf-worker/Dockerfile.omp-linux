@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7-labs
+###############################################################################
+# Build a standalone linux-x64 `omp` binary for the yf worker image.
+#
+#   docker build -f deploy/yf-worker/Dockerfile.omp-linux \
+#       --target export --output type=local,dest=deploy/yf-worker/dist .
+#
+# Output: deploy/yf-worker/dist/omp — a Bun --compile binary that embeds the
+# native addon and worker entrypoints. Reuses the repo's real build steps
+# (`packages/natives` build + `build-binary.ts`) so the artifact matches what
+# omp ships; only the packaging target (a pinned binary) differs.
+#
+# Context MUST be the repo root. `Dockerfile.omp-linux.dockerignore` keeps
+# node_modules/target/dist out so the in-container `bun install` is authoritative.
+###############################################################################
+ARG BUN_VERSION=1.3.14
+
+# Mirrors the repo's `natives-builder` base + deps so the Rust addon compiles
+# identically; `rustup show` fetches the toolchain pinned by rust-toolchain.toml.
+FROM rust:1.86-slim-bookworm AS build
+ARG BUN_VERSION
+ENV BUN_INSTALL=/opt/bun \
+    PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+    CARGO_TERM_COLOR=never \
+    TARGET_PLATFORM=linux \
+    TARGET_ARCH=x64 \
+    TARGET_VARIANT=baseline
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates pkg-config libssl-dev unzip git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
+    && /opt/bun/bin/bun --version
+
+WORKDIR /pi
+COPY . /pi/
+
+# Hydrate node_modules from the lockfile (scripts run explicitly below).
+RUN bun install --frozen-lockfile --ignore-scripts
+
+# baseline (x86-64-v2) keeps the binary portable across worker hosts even if the
+# build host has AVX2. `rustup show` installs the repo-pinned nightly.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/pi/target \
+    set -eux; \
+    rustup show; \
+    bun --cwd=packages/natives run build; \
+    bun --cwd=packages/coding-agent run generate-docs-index; \
+    bun --cwd=packages/coding-agent run build; \
+    /pi/packages/coding-agent/dist/omp --version
+
+# Export-only stage: `--output type=local` writes just the binary to the host.
+FROM scratch AS export
+COPY --from=build /pi/packages/coding-agent/dist/omp /omp

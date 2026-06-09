@@ -1,0 +1,14 @@
+# omp settings for the yf worker agent (nested YAML; keys per
+# packages/coding-agent/src/config/settings-schema.ts).
+#
+# Scope: STATIC hardening only. Per-exec capability scoping (tools, skills,
+# extensions, session) is done with CLI flags by the yf driver — see README.md —
+# because config cannot vary per task. Keep this file minimal and uncontroversial
+# so it never fights the driver and never conflicts on upstream merges.
+startup:
+  # Do not phone home to npm for a newer upstream version — this is a pinned fork.
+  checkUpdate: false
+  # No interactive first-run wizard in an unattended container.
+  setupWizard: false
+  # Quiet boot: no welcome/changelog chatter on the RPC stream.
+  quiet: true

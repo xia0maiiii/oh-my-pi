@@ -1,0 +1,23 @@
+# models.yml TEMPLATE — rendered by entrypoint.sh (envsubst) at container start,
+# and/or rewritten per-exec by the yf OmpRpcDriver when model/creds vary per task.
+# Schema: ../../../../../docs/models.md
+#
+# Secrets are NEVER written here. `apiKey` is the NAME of an env var that omp
+# resolves at runtime (env-name-or-literal semantics). yf already injects the
+# secret as $PI_API_KEY (cairn-server agent_runtime), so it stays in process env.
+providers:
+  cairn:
+    baseUrl: "${YF_OMP_BASE_URL}"
+    apiKey: PI_API_KEY
+    api: "${YF_OMP_API}"
+    authHeader: ${YF_OMP_AUTH_HEADER}
+    # Anthropic-fronted gateways usually reject the per-tool `strict` field.
+    disableStrictTools: true
+    models:
+      - id: "${YF_OMP_MODEL_ID}"
+        name: "${YF_OMP_MODEL_NAME}"
+        reasoning: ${YF_OMP_REASONING}
+        input: [text]
+        contextWindow: ${YF_OMP_CONTEXT_WINDOW}
+        maxTokens: ${YF_OMP_MAX_TOKENS}
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

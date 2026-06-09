@@ -1,0 +1,12 @@
+# Keep heavy/host-specific trees out of the omp-linux build context so the
+# in-container `bun install` + native build are authoritative. Mirrors the
+# repo's Dockerfile.dockerignore intent.
+**/node_modules
+**/target
+**/dist
+**/.git
+.git
+runs
+**/*.log
+deploy/yf-worker/dist
+packages/natives/native/*.node
