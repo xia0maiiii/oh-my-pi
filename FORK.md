@@ -99,7 +99,7 @@ Keep this exhaustive. On every sync, walk it and re-validate each row.
 | # | Tier | Marker topic | Files | Purpose | Relies on (upstream) | Re-validate after sync | Upstreamable? |
 |---|------|--------------|-------|---------|----------------------|------------------------|---------------|
 | 1 | T0 | — (additive bundle) | `deploy/yf-worker/**` | yf/Cairn RPC worker integration | RPC wire, `models.yml` schema, CLI flags | `deploy/yf-worker/smoke-rpc.ts` green | no (private) |
-| 2 | T0 | — (fork infra) | `FORK.md`, `fork/**` | fork-maintenance rig | — | `fork/sync.sh` runs | no |
+| 2 | T0 | — (fork infra) | `FORK.md`, `fork/**`, `.github/workflows/fork-sync.yml` | fork-maintenance rig + CI sync-bot | — | `fork/sync.sh` runs; bot files an issue | no |
 
 _(append one row per Tier-1/Tier-2 patch as you add it)_
 
@@ -152,6 +152,19 @@ parts free, and each step's conflicts stay small and legible.
 `git rebase --abort` mid-conflict, or `git reset --hard fork-backup` after the fact.
 
 ---
+
+## CI sync-bot & fork repo settings (GitHub-side)
+
+`.github/workflows/fork-sync.yml` runs Mon/Thu (and on manual dispatch): it probes whether our
+series still rebases onto the newest upstream tag and files/updates a `fork-sync`-labelled issue
+with the result + the exact local commands. It is **report-only** — it never pushes `main` or
+builds. Do the real sync locally with `fork/sync.sh`.
+
+Because this fork is an independent private repo carrying upstream's full history, it also
+inherited upstream's `ci.yml` (their CI on every push). That is **disabled** on the fork
+(`gh workflow disable CI`) — we build/test locally; re-enable with `gh workflow enable CI` if
+ever wanted. Keep Actions enabled (Settings → Actions) so the bot's schedule can fire, or just
+run `fork/sync.sh` on demand.
 
 ## Semantic drift is the real enemy
 
