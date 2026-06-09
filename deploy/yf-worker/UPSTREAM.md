@@ -4,20 +4,35 @@ This fork's only deviations from upstream live under `deploy/yf-worker/` (this
 bundle) — **no edits to `packages/coding-agent/src/` core**. That is what makes
 upstream merges essentially conflict-free. Keep it that way.
 
-## One-time remote setup
+## Remote layout (configured)
 
-Your clone currently has `origin` pointing at upstream. Re-point it so `origin`
-is your private fork and `upstream` is read-only:
+This clone is already wired as a private downstream fork:
 
 ```sh
-git remote rename origin upstream                 # can1357/oh-my-pi (read-only)
-git remote add origin <your-private-fork-url>     # your fork (push target)
-git fetch upstream --tags
-git push -u origin main
+origin    https://github.com/xia0maiiii/oh-my-pi.git   # your private fork (push here)
+upstream  https://github.com/can1357/oh-my-pi          # read-only (push disabled)
 ```
 
-Pin work to upstream **release tags** (e.g. `v15.10.4`), never `upstream/main`
-(it moves dozens of times a day).
+`main` is the **integration branch**: upstream history + this `deploy/yf-worker/`
+bundle on top. Pin syncs to upstream **release tags** (e.g. `v15.10.4`), never
+`upstream/main` (it moves dozens of times a day). Tags come from upstream:
+`git fetch upstream --tags`.
+
+## Local `omp` runs this tree (dev-linked)
+
+The global `omp` is symlinked straight at this working tree, so every `omp` you
+run *is* your fork — edits and upstream merges take effect with no reinstall:
+
+```sh
+ln -sfn "$PWD/packages/coding-agent/scripts/dev-launch" /opt/homebrew/bin/omp
+```
+
+Note: `bun run install:dev` writes this symlink into `$(bun pm -g bin)`
+(`~/.bun/install/global/bin`), which is **not on this machine's PATH** — so we
+link `/opt/homebrew/bin/omp` (the entry that *is* on PATH) directly instead.
+`dev-launch` resolves the symlink back to `src/cli.ts` here, so only the link
+location matters. Rebuild the native addon (`bun run build:native`) only when an
+upstream sync touches Rust under `crates/`; TS changes are picked up live.
 
 ## Upgrade SOP (each time you take a newer omp)
 
@@ -32,7 +47,11 @@ Pin work to upstream **release tags** (e.g. `v15.10.4`), never `upstream/main`
    - read `packages/coding-agent/CHANGELOG.md` across the range.
 3. `git merge v<new>` (or rebase the `deploy/yf-worker/` commits onto the tag).
    Expect **no conflicts** — this bundle only adds files.
-4. Rebuild the binary: `deploy/yf-worker/build-linux-binary.sh`.
+4. Rebuild:
+   - **Local dev-linked `omp`** — nothing for TS (picked up live); run
+     `bun run build:native` only if the range touched `crates/`. `omp --version`
+     should now report `v<new>`.
+   - **Worker image** — `deploy/yf-worker/build-linux-binary.sh`.
 5. Run the smoke test (`deploy/yf-worker/smoke-rpc.sh`) and the yf dispatcher
    integration test against the new binary.
 6. **Only after green:** bump `OMP_VERSION` in `yf-rust/container/Dockerfile` to
