@@ -1,8 +1,12 @@
 # Tracking upstream omp in this fork
 
-This fork's only deviations from upstream live under `deploy/yf-worker/` (this
-bundle) — **no edits to `packages/coding-agent/src/` core**. That is what makes
-upstream merges essentially conflict-free. Keep it that way.
+`deploy/yf-worker/` is the **yf-specific, Tier-0 slice** of the fork: it only *adds*
+files (hooks/config/prompts/build), so it never conflicts on an upstream sync. Keep
+it that way — push yf logic to the supported out-of-core seams, not into core.
+
+Deep core/Rust customizations and the **git sync mechanics for the whole fork are
+governed by [`/FORK.md`](../../FORK.md)** (tiers, seam markers, the rebase SOP,
+`fork/sync.sh`). This file only covers what is yf-container-specific.
 
 ## Remote layout (configured)
 
@@ -45,8 +49,8 @@ upstream sync touches Rust under `crates/`; TS changes are picked up live.
      (`--mode rpc`, `--tools`, `--no-extensions/--no-skills/--no-lsp`,
      `--append-system-prompt`, `--model`, `--thinking`, `--session-dir`)
    - read `packages/coding-agent/CHANGELOG.md` across the range.
-3. `git merge v<new>` (or rebase the `deploy/yf-worker/` commits onto the tag).
-   Expect **no conflicts** — this bundle only adds files.
+3. Sync the fork onto the tag: `fork/sync.sh v<new>` (rebase + rerere; see `/FORK.md`).
+   This bundle only adds files so it never conflicts — but your core/Rust patches might.
 4. Rebuild:
    - **Local dev-linked `omp`** — nothing for TS (picked up live); run
      `bun run build:native` only if the range touched `crates/`. `omp --version`
