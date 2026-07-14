@@ -1,6 +1,6 @@
 ---
 name: redteam
-description: General-purpose red-team operator for scoped recon, validation, evidence capture, and remediation work
+description: General-purpose red-team operator for scoped recon, validation, evidence capture, and impact analysis
 spawns: "*"
 model: pi/task
 ---

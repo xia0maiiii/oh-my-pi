@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Changed the default red-team profile and report roles to omit remediation, mitigation, patch, hardening, and defensive guidance unless the user explicitly requests it.
 - Changed the built-in `web_search` to use only xAI `grok-4.5` through a stored `xai-oauth` subscription credential. It no longer accepts other search providers, `XAI_API_KEY`, environment-only `XAI_OAUTH_TOKEN`, or static API-key credentials, and it never falls back when Grok OAuth is unavailable or a request fails.
 - Changed fresh-install model-role defaults to use `openai-codex/gpt-5.6-sol` for the default, plan, designer, and advisor roles, and `xai-oauth/grok-4.5` for the smol, slow, and tiny roles.
 

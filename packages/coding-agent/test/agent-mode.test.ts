@@ -116,6 +116,22 @@ describe("agent mode", () => {
 		expect(redteam).toContain("Optimize for correctness first");
 		expect(redteam).toContain('<agent-mode name="redteam">');
 		expect(redteam).toContain("complete Burp-style request and response");
+		expect(redteam).toContain(
+			"Do not propose remediation, mitigations, patches, hardening, or defensive guidance unless the user explicitly asks for it.",
+		);
+	});
+
+	it("keeps remediation guidance out of the default redteam agent roles", () => {
+		const agents = loadBundledAgents("redteam");
+		const redteam = agents.find(agent => agent.name === "redteam");
+		const reportDesigner = agents.find(agent => agent.name === "report-designer");
+
+		expect(redteam?.description).toBe(
+			"General-purpose red-team operator for scoped recon, validation, evidence capture, and impact analysis",
+		);
+		expect(reportDesigner?.systemPrompt).toContain(
+			"You NEVER add remediation, mitigation, patch, hardening, or defensive-guidance sections unless the assignment explicitly requests them.",
+		);
 	});
 
 	it("preserves custom system prompt replacement semantics", async () => {
