@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMode } from "@oh-my-pi/pi-coding-agent/config/agent-mode";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -13,9 +14,10 @@ const TEST_AGENTS = [
 	},
 ];
 
-function createSession(cwd: string): ToolSession {
+function createSession(cwd: string, agentMode: AgentMode = "coding"): ToolSession {
 	return {
 		cwd,
+		agentMode,
 		hasUI: false,
 		settings: Settings.isolated({}),
 		getSessionFile: () => null,
@@ -49,6 +51,31 @@ describe("TaskTool.create discovery memo", () => {
 		await TaskTool.create(createSession("/tmp/omp-memo-other"));
 
 		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not reuse discovery across profiles in the same cwd", async () => {
+		const spy = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: TEST_AGENTS, projectAgentsDir: null });
+
+		await TaskTool.create(createSession("/tmp", "coding"));
+		await TaskTool.create(createSession("/tmp", "redteam"));
+
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(spy.mock.calls.map(call => call[2])).toEqual(["coding", "redteam"]);
+	});
+
+	it("renders the task contract for the active profile", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: TEST_AGENTS,
+			projectAgentsDir: null,
+		});
+
+		const coding = await TaskTool.create(createSession("/tmp", "coding"));
+		const redteam = await TaskTool.create(createSession("/tmp", "redteam"));
+
+		expect(coding.description).not.toContain("HTTP(S) vulns need full Burp request+response");
+		expect(redteam.description).toContain("HTTP(S) vulns need full Burp request+response");
 	});
 
 	it("does not cache a rejected discovery", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { FileEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 
 describe("migrateSessionEntries", () => {
@@ -26,7 +26,9 @@ describe("migrateSessionEntries", () => {
 		migrateSessionEntries(entries);
 
 		// Header should have version set to current
-		expect((entries[0] as any).version).toBe(3);
+		const header = entries[0] as SessionHeader;
+		expect(header.version).toBe(4);
+		expect(header.agentMode).toBe("coding");
 
 		// Entries should have id/parentId
 		const msg1 = entries[1] as any;
@@ -39,6 +41,21 @@ describe("migrateSessionEntries", () => {
 		expect(msg2.id).toBeDefined();
 		expect(msg2.id.length).toBe(8);
 		expect(msg2.parentId).toBe(msg1.id);
+	});
+
+	it("pins v3 sessions to coding when adding the profile field", () => {
+		const header: SessionHeader = {
+			type: "session",
+			id: "legacy-v3",
+			version: 3,
+			timestamp: "2025-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+
+		migrateSessionEntries([header]);
+
+		expect(header.version).toBe(4);
+		expect(header.agentMode).toBe("coding");
 	});
 
 	it("should be idempotent (skip already migrated)", () => {

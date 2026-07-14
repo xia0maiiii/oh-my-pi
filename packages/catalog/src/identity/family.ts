@@ -78,7 +78,7 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
-const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3"] as const;
+const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3", "grok-4.5"] as const;
 
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
@@ -89,6 +89,12 @@ export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
 	if (!bare) return false;
 	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => bare.startsWith(prefix));
+});
+
+/** Grok 4.5 and its dated/latest aliases share the mandatory three-tier effort surface. */
+export const isGrok45ModelId = memo((modelId: string): boolean => {
+	const bare = bareModelId(modelId).trim().toLowerCase();
+	return bare === "grok-4.5" || bare.startsWith("grok-4.5-");
 });
 
 /**

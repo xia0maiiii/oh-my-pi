@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMode } from "@oh-my-pi/pi-coding-agent/config/agent-mode";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
@@ -98,6 +99,8 @@ describe("ReviewCommand", () => {
 	}
 
 	function createContext(options?: {
+		hasUI?: boolean;
+		agentMode?: AgentMode;
 		selectedMode?: string;
 		selectResults?: string[];
 		editorValue?: string | undefined;
@@ -109,8 +112,9 @@ describe("ReviewCommand", () => {
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
 		return {
-			hasUI: true,
+			hasUI: options?.hasUI ?? true,
 			sessionManager: {
+				getHeader: () => ({ agentMode: options?.agentMode ?? "coding" }),
 				getEntries: () => options?.sessionEntries ?? [],
 				getBranch: () => options?.branchEntries ?? options?.sessionEntries ?? [],
 			},
@@ -136,6 +140,18 @@ describe("ReviewCommand", () => {
 			},
 		} as unknown as HookCommandContext;
 	}
+
+	it("routes headless review instructions by the persisted session profile", async () => {
+		const dir = await createTempDir();
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+
+		const coding = await command.execute([], createContext({ hasUI: false, agentMode: "coding" }));
+		const redteam = await command.execute([], createContext({ hasUI: false, agentMode: "redteam" }));
+
+		expect(coding).toContain('agent: "reviewer"');
+		expect(coding).not.toContain("full Burp");
+		expect(redteam).toContain('agent: "finding-reviewer"');
+	});
 
 	it("uses prompt-style input for custom review instructions", async () => {
 		const dir = await createTempDir();

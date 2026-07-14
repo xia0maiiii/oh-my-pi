@@ -3,6 +3,7 @@ import {
 	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGlmVisionModelId,
+	isGrok45ModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK26ModelId,
 	isKimiModelId,
@@ -261,6 +262,7 @@ describe("modelFamilyToken", () => {
 
 describe("isGrokReasoningEffortCapable", () => {
 	test("matches effort-capable Grok SKUs across namespaces", () => {
+		expect(isGrokReasoningEffortCapable("grok-4.5")).toBe(true);
 		expect(isGrokReasoningEffortCapable("grok-4.3")).toBe(true);
 		expect(isGrokReasoningEffortCapable("grok-3-mini")).toBe(true);
 		expect(isGrokReasoningEffortCapable("grok-4.20-multi-agent")).toBe(true);
@@ -273,5 +275,14 @@ describe("isGrokReasoningEffortCapable", () => {
 		expect(isGrokReasoningEffortCapable("grok-4.20-0309-reasoning")).toBe(false);
 		expect(isGrokReasoningEffortCapable("gpt-5")).toBe(false);
 		expect(isGrokReasoningEffortCapable("")).toBe(false);
+	});
+});
+
+describe("isGrok45ModelId", () => {
+	test("matches exact, aliased, and namespaced Grok 4.5 ids", () => {
+		expect(isGrok45ModelId("grok-4.5")).toBe(true);
+		expect(isGrok45ModelId("grok-4.5-latest")).toBe(true);
+		expect(isGrok45ModelId("xai-oauth/grok-4.5")).toBe(true);
+		expect(isGrok45ModelId("grok-4.3")).toBe(false);
 	});
 });

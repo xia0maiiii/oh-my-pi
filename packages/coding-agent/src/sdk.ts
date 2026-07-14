@@ -29,6 +29,7 @@ import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/con
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import { type AgentMode, resolveAgentMode } from "./config/agent-mode";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -384,6 +385,8 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
+	/** Session behavior profile. Defaults to the `agentMode` setting and is frozen at session creation. */
+	agentMode?: AgentMode;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
 
@@ -819,6 +822,7 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
+	agentMode?: AgentMode;
 	customPrompt?: string;
 	appendPrompt?: string;
 	inlineToolDescriptors?: boolean;
@@ -836,6 +840,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
 		customPrompt: options.customPrompt,
+		agentMode: options.agentMode,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
@@ -1220,6 +1225,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const agentMode = resolveAgentMode(
+		options.agentMode,
+		sessionManager.getHeader()?.agentMode,
+		settings.get("agentMode"),
+	);
+	sessionManager.setAgentMode(agentMode);
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	// Startup model *selection* only needs to know whether auth is configured for
 	// a candidate's provider — never the resolved key bytes. Use the synchronous,
@@ -1539,6 +1550,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			hasUI: options.hasUI ?? false,
+			agentMode,
 			enableLsp,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -2398,6 +2410,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd,
+				agentMode,
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills,
 				contextFiles,
@@ -2832,6 +2845,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			agentMode,
 			autoApprove: options.autoApprove,
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).

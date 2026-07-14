@@ -343,6 +343,7 @@ export class SelectorController {
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
 		const dashboard = await AgentDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
+			agentMode: this.ctx.session.agentMode,
 			modelRegistry: this.ctx.session.modelRegistry,
 			activeModelPattern,
 			defaultModelPattern,
@@ -400,6 +401,11 @@ export class SelectorController {
 				this.ctx.session.setThinkingLevel(value as ConfiguredThinkingLevel, true);
 				this.ctx.statusLine.invalidate();
 				this.ctx.updateEditorBorderColor();
+				break;
+			case "agentMode":
+				this.ctx.showStatus(
+					`Agent mode will apply to future agent sessions. This session and its branches remain ${this.ctx.session.agentMode}.`,
+				);
 				break;
 			case "personality":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {

@@ -193,6 +193,42 @@ export async function readTitleSlotFromFile(
 	if (newlineIndex < 0) return undefined;
 	return parseTitleSlotLine(head.slice(0, newlineIndex));
 }
+
+/** Read only the title slot and session header, avoiding full-history materialization. */
+export async function readSessionHeaderFromFile(
+	filePath: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionHeader | undefined> {
+	let head: string;
+	try {
+		[head] = await storage.readTextSlices(filePath, 16 * 1024, 0);
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+
+	for (const line of head.split("\n", 3)) {
+		if (!line) continue;
+		try {
+			const value: unknown = JSON.parse(line);
+			if (
+				typeof value === "object" &&
+				value !== null &&
+				"type" in value &&
+				value.type === "session" &&
+				"id" in value &&
+				typeof value.id === "string"
+			) {
+				const header = value as SessionHeader;
+				migrateToCurrentVersion([header]);
+				return header;
+			}
+		} catch {
+			// The fixed title slot or a truncated line may be malformed; inspect the next line.
+		}
+	}
+	return undefined;
+}
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {
 	return parseSessionContent(content).entries;

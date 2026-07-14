@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	expandRoleAlias,
@@ -17,7 +19,7 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getDefault, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -780,7 +782,7 @@ describe("resolveAgentModelPatterns", () => {
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {
-		const settings = Settings.isolated();
+		const settings = Settings.isolated({ modelRoles: {} });
 		const patterns = resolveAgentModelPatterns({ agentModel: "pi/slow", settings });
 
 		const dottedRegistry = {
@@ -1195,6 +1197,28 @@ describe("parseModelString", () => {
 });
 
 describe("resolveModelFromString", () => {
+	test("resolves every compiled model-role default from the bundled catalog", () => {
+		const availableModels = [...getBundledModels("openai-codex"), ...getBundledModels("xai-oauth")];
+		const expected = {
+			default: { provider: "openai-codex", id: "gpt-5.6-sol", thinking: Effort.High },
+			smol: { provider: "xai-oauth", id: "grok-4.5", thinking: Effort.High },
+			slow: { provider: "xai-oauth", id: "grok-4.5", thinking: Effort.High },
+			plan: { provider: "openai-codex", id: "gpt-5.6-sol", thinking: Effort.XHigh },
+			designer: { provider: "openai-codex", id: "gpt-5.6-sol", thinking: Effort.XHigh },
+			tiny: { provider: "xai-oauth", id: "grok-4.5", thinking: ThinkingLevel.Off },
+			advisor: { provider: "openai-codex", id: "gpt-5.6-sol", thinking: Effort.XHigh },
+		} as const;
+
+		for (const [role, contract] of Object.entries(expected)) {
+			const resolved = resolveModelRoleValue(getDefault("modelRoles")[role], availableModels);
+			expect(resolved.model?.provider, role).toBe(contract.provider);
+			expect(resolved.model?.id, role).toBe(contract.id);
+			expect(resolved.thinkingLevel, role).toBe(contract.thinking);
+			expect(resolved.explicitThinkingLevel, role).toBe(true);
+			expect(resolved.warning, role).toBeUndefined();
+		}
+	});
+
 	test("applies max as a provider model selector alias after literal lookup misses", () => {
 		const result = resolveModelFromString("nanogpt/coding-router:max", [mockMaxSuffixModels[0]]);
 		expect(result?.provider).toBe("nanogpt");

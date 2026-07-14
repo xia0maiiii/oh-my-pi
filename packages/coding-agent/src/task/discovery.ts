@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled } from "../capability";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
@@ -66,8 +67,13 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
  * installed npm/link plugins), Claude marketplace plugin agents (project
  * scope before user), then bundled.
  * @param cwd - Current working directory for project agent discovery
+ * @param agentMode - Session profile used to select bundled specialists
  */
-export async function discoverAgents(cwd: string, home: string = os.homedir()): Promise<DiscoveryResult> {
+export async function discoverAgents(
+	cwd: string,
+	home: string = os.homedir(),
+	agentMode: AgentMode = DEFAULT_AGENT_MODE,
+): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
 	const userDirs = getConfigDirs("agents", { project: false })
@@ -126,7 +132,7 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 			return true;
 		});
 
-	const bundledAgents = loadBundledAgents().filter(agent => {
+	const bundledAgents = loadBundledAgents(agentMode).filter(agent => {
 		if (seen.has(agent.name)) return false;
 		seen.add(agent.name);
 		return true;

@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import chalk from "chalk";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import { theme } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
@@ -22,11 +23,13 @@ export interface AgentsCommandArgs {
 		dir?: string;
 		user?: boolean;
 		project?: boolean;
+		mode?: AgentMode;
 	};
 }
 
 interface UnpackResult {
 	targetDir: string;
+	agentMode: AgentMode;
 	total: number;
 	written: string[];
 	skipped: string[];
@@ -77,8 +80,9 @@ function serializeAgent(agent: AgentDefinition): string {
 async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<UnpackResult> {
 	const targetDir = resolveTargetDir(flags);
 	await fs.mkdir(targetDir, { recursive: true });
+	const agentMode = flags.mode ?? DEFAULT_AGENT_MODE;
 
-	const bundledAgents = [...loadBundledAgents()].sort((a, b) => a.name.localeCompare(b.name));
+	const bundledAgents = [...loadBundledAgents(agentMode)].sort((a, b) => a.name.localeCompare(b.name));
 	const written: string[] = [];
 	const skipped: string[] = [];
 
@@ -99,6 +103,7 @@ async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<U
 	}
 
 	return {
+		agentMode,
 		targetDir,
 		total: bundledAgents.length,
 		written,
@@ -116,6 +121,7 @@ export async function runAgentsCommand(cmd: AgentsCommandArgs): Promise<void> {
 			}
 
 			writeStdout(chalk.bold(`Bundled agents: ${result.total}`));
+			writeStdout(chalk.dim(`Agent mode: ${result.agentMode}`));
 			writeStdout(chalk.dim(`Target directory: ${result.targetDir}`));
 			writeStdout(chalk.green(`${theme.status.success} Written: ${result.written.length}`));
 			if (result.skipped.length > 0) {

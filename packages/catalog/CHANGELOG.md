@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `grok-4.5` to the bundled xAI Grok OAuth catalog with its 500K text-and-image context and mandatory low, medium, or high reasoning effort surface.
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

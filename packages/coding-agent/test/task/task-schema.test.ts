@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMode } from "@oh-my-pi/pi-coding-agent/config/agent-mode";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -54,9 +55,10 @@ describe("task spawn validation", () => {
 		vi.restoreAllMocks();
 	});
 
-	function createSession(): ToolSession {
+	function createSession(agentMode: AgentMode = "coding"): ToolSession {
 		return {
 			cwd: "/tmp",
+			agentMode,
 			hasUI: false,
 			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": false }),
 			getSessionFile: () => null,
@@ -64,9 +66,9 @@ describe("task spawn validation", () => {
 		} as unknown as ToolSession;
 	}
 
-	async function executeText(params: unknown): Promise<string> {
+	async function executeText(params: unknown, agentMode: AgentMode = "coding"): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const tool = await TaskTool.create(createSession());
+		const tool = await TaskTool.create(createSession(agentMode));
 		const result = await tool.execute("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";
 	}
@@ -76,6 +78,11 @@ describe("task spawn validation", () => {
 		// failure is unknown-agent (none discovered), not missing-agent.
 		const text = await executeText({ assignment: "..." });
 		expect(text).toContain('Unknown agent "task"');
+	});
+
+	it("defaults a missing agent to `redteam` in redteam sessions", async () => {
+		const text = await executeText({ assignment: "..." }, "redteam");
+		expect(text).toContain('Unknown agent "redteam"');
 	});
 
 	it("rejects a missing assignment", async () => {

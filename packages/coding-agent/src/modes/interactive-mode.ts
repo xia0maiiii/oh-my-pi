@@ -90,6 +90,10 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
 };
+import planModeRedteamApprovedPrompt from "../prompts/system/plan-mode-redteam-approved.md" with { type: "text" };
+import planModeRedteamCompactInstructionsPrompt from "../prompts/system/plan-mode-redteam-compact-instructions.md" with {
+	type: "text",
+};
 import type { AgentRegistry } from "../registry/agent-registry";
 import {
 	type AgentSession,
@@ -2693,7 +2697,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				// past the cancel guard — see the comment at the cancel branch.
 				// Cancellation skips the synthetic-prompt dispatch (operator's explicit
 				// abort is honored); failure proceeds best-effort — approval intent stands.
-				const compactionPrompt = prompt.render(planModeCompactInstructionsPrompt, {
+				const compactTemplate =
+					this.session.agentMode === "redteam"
+						? planModeRedteamCompactInstructionsPrompt
+						: planModeCompactInstructionsPrompt;
+				const compactionPrompt = prompt.render(compactTemplate, {
 					planFilePath: options.planFilePath,
 				});
 				// Pin the plan reference path BEFORE compaction so any user messages
@@ -2769,7 +2777,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// markPlanReferenceSent fires only on the dispatch path so the synthetic
 		// plan-approved prompt is the source of the reference injection.
 		this.session.markPlanReferenceSent();
-		const planModePrompt = prompt.render(planModeApprovedPrompt, {
+		const approvedTemplate =
+			this.session.agentMode === "redteam" ? planModeRedteamApprovedPrompt : planModeApprovedPrompt;
+		const planModePrompt = prompt.render(approvedTemplate, {
 			planFilePath: options.planFilePath,
 			contextPreserved: options.preserveContext === true,
 		});

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added session-scoped `coding` and `redteam` behavior profiles, selectable with the `agentMode` setting or `--agent-mode`, with persisted resume/branch behavior, profile-specific prompt routing, and a red-team specialist roster. New sessions default to `redteam`; the generic `coding` profile remains explicitly selectable.
+
+### Changed
+
+- Changed the built-in `web_search` to use only xAI `grok-4.5` through a stored `xai-oauth` subscription credential. It no longer accepts other search providers, `XAI_API_KEY`, environment-only `XAI_OAUTH_TOKEN`, or static API-key credentials, and it never falls back when Grok OAuth is unavailable or a request fails.
+- Changed fresh-install model-role defaults to use `openai-codex/gpt-5.6-sol` for the default, plan, designer, and advisor roles, and `xai-oauth/grok-4.5` for the smol, slow, and tiny roles.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

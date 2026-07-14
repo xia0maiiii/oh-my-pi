@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import type { AgentMode } from "@oh-my-pi/pi-coding-agent/config/agent-mode";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
-function makeSession(opts: { spawns?: string | null; backends?: Record<string, boolean> }): ToolSession {
+function makeSession(opts: {
+	spawns?: string | null;
+	backends?: Record<string, boolean>;
+	agentMode?: AgentMode;
+}): ToolSession {
 	const settings = Settings.isolated();
 	for (const [key, value] of Object.entries(opts.backends ?? {})) settings.set(key as never, value);
 	return {
 		cwd: "/tmp/eval-test",
+		agentMode: opts.agentMode,
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => opts.spawns ?? "*",
@@ -43,6 +49,14 @@ describe("eval tool description", () => {
 	it("advertises agent() when spawns are allowed", () => {
 		const text = getEvalToolDescription({ py: true, js: true, spawns: true });
 		expect(text).toContain("agent(prompt");
+	});
+
+	it("advertises the redteam worker as the redteam session default", () => {
+		const text = getEvalToolDescription({ py: true, js: true, spawns: true, agentMode: "redteam" });
+		expect(text).toContain('agent(prompt, agent?="redteam"');
+		expect(new EvalTool(makeSession({ agentMode: "redteam" })).description).toContain(
+			'agent(prompt, agent?="redteam"',
+		);
 	});
 
 	it("omits agent() when the session forbids spawning", () => {

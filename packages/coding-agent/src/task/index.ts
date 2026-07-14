@@ -20,12 +20,16 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import type { AgentMode } from "../config/agent-mode";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
+import planModeRedteamSubagentPrompt from "../prompts/system/plan-mode-redteam-subagent.md" with { type: "text" };
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
+import planModeSubagentWrapper from "../prompts/system/plan-mode-subagent-wrapper.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
+import taskRedteamDescriptionTemplate from "../prompts/tools/task-redteam.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/irc";
@@ -187,8 +191,9 @@ function renderDescription(
 	asyncEnabled: boolean,
 	ircEnabled: boolean,
 	parentSpawns: string,
+	agentMode: AgentMode,
 ): string {
-	const spawnPolicy = resolveSpawnPolicy(parentSpawns);
+	const spawnPolicy = resolveSpawnPolicy(parentSpawns, agentMode);
 	const spawningDisabled = !spawnPolicy.enabled;
 	let filteredAgents = disabledAgents.length > 0 ? agents.filter(a => !disabledAgents.includes(a.name)) : agents;
 	if (spawningDisabled) {
@@ -202,7 +207,8 @@ function renderDescription(
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
 	}));
-	return prompt.render(taskDescriptionTemplate, {
+	const template = agentMode === "redteam" ? taskRedteamDescriptionTemplate : taskDescriptionTemplate;
+	return prompt.render(template, {
 		agents: renderedAgents,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
@@ -332,14 +338,14 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
 }
 
 /** Generic worker agents whose output sharpens with a tailored `role` rather than the bare type. */
-const GENERIC_SPAWN_AGENTS: ReadonlySet<string> = new Set(["task", "sonic"]);
+const GENERIC_SPAWN_AGENTS: ReadonlySet<string> = new Set(["task", "redteam", "sonic"]);
 
 /**
  * Advisory — never a rejection — nudging the spawner toward tailored
  * specialists when it spawns generic role-less workers and still holds spawn
  * capacity (DepthCapacity: it currently has the `task` tool). Fires when a
- * generic `task`/`sonic` spawn carries no `role`, or when one call clones
- * the same agent ≥2× all without roles. Returns undefined when no nudge applies.
+ * generic worker spawn carries no `role`, or when one call clones the same
+ * agent ≥2× all without roles. Returns undefined when no nudge applies.
  */
 export function buildSpecializationAdvisory(
 	agentName: string | undefined,
@@ -408,28 +414,29 @@ export function composeSpawnAdvisory(args: {
 class TaskJobError extends Error {}
 
 /**
- * Process-level memo for create-time agent discovery, keyed by resolved cwd.
+ * Process-level memo for create-time agent discovery, keyed by session profile
+ * and resolved cwd.
  *
  * `TaskTool.create` runs for every (sub)agent session in this process and the
  * walk-up + plugin-registry scan in `discoverAgents` is identical for a given
- * cwd, so repeat creations reuse the first scan. Execution-time discovery
- * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
- * `discoverAgents` binding: test spies swap that binding, which invalidates
+ * profile/cwd pair, so repeat creations reuse the first scan. Execution-time
+ * discovery (`#runSpawn`) intentionally stays fresh. The memo also tracks the
+ * live `discoverAgents` binding: test spies swap that binding, which invalidates
  * the memo automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
+function discoverAgentsForCreate(cwd: string, agentMode: AgentMode): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 	}
-	const key = path.resolve(cwd);
+	const key = `${agentMode}:${path.resolve(cwd)}`;
 	let pending = discoveryMemo.get(key);
 	if (!pending) {
-		pending = fn(cwd);
+		pending = fn(cwd, os.homedir(), agentMode);
 		discoveryMemo.set(key, pending);
 		pending.catch(() => {
 			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
@@ -499,6 +506,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
+	readonly #agentMode: AgentMode;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
 	 * subagents across parallel `task` calls within the session. Resized in
@@ -510,7 +518,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const isolationEnabled = this.session.settings.get("task.isolation.mode") !== "none";
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns(), this.#agentMode).defaultAgent;
 		return getTaskSchema({ isolationEnabled, batchEnabled: this.#isBatchEnabled(), defaultAgent });
 	}
 
@@ -532,14 +540,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("async.enabled"),
 			isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			this.session.getSessionSpawns() ?? "*",
+			this.#agentMode,
 		);
 	}
 	private constructor(
 		private readonly session: ToolSession,
 		discoveredAgents: AgentDefinition[],
+		agentMode: AgentMode,
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
+		this.#agentMode = agentMode;
 	}
 
 	#isBatchEnabled(): boolean {
@@ -564,8 +575,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd);
-		return new TaskTool(session, agents);
+		const agentMode = session.agentMode ?? session.settings.get("agentMode");
+		const { agents } = await discoverAgentsForCreate(session.cwd, agentMode);
+		return new TaskTool(session, agents, agentMode);
 	}
 
 	async execute(
@@ -578,7 +590,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults run for model calls, but internal callers and stale
 		// transcripts can bypass arktype. Normalize once so every downstream path
 		// sees the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns(), this.#agentMode).defaultAgent;
 		const params =
 			typeof repaired.agent === "string" && repaired.agent.trim() !== ""
 				? repaired
@@ -1075,7 +1087,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
-		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
+		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd, os.homedir(), this.#agentMode);
 		const agentName = params.agent ?? "";
 		const sharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		const assignment = (params.assignment ?? "").trim();
@@ -1129,7 +1141,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const effectiveAgent: typeof agent = planModeState?.enabled
 			? {
 					...agent,
-					systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
+					systemPrompt: prompt.render(planModeSubagentWrapper, {
+						planModePrompt:
+							this.#agentMode === "redteam" ? planModeRedteamSubagentPrompt : planModeSubagentPrompt,
+						agentPrompt: agent.systemPrompt,
+					}),
 					tools: planModeTools,
 					spawns: undefined,
 				}
@@ -1210,7 +1226,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 
 			// Check spawn restrictions from parent
-			const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+			const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns(), this.#agentMode);
 			const spawnAllowed =
 				spawnPolicy.enabled &&
 				(spawnPolicy.allowedAgents === null || spawnPolicy.allowedAgents.includes(agentName));
@@ -1286,6 +1302,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 			const sharedRunOptions = {
 				cwd: this.session.cwd,
+				agentMode: this.#agentMode,
 				agent: effectiveAgent,
 				task: renderSubagentUserPrompt(assignment),
 				assignment,

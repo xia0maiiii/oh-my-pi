@@ -12,7 +12,9 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/task/index.ts`](../packages/coding-agent/src/task/index.ts)
 - [`src/task/commands.ts`](../packages/coding-agent/src/task/commands.ts)
 - [`src/prompts/agents/task.md`](../packages/coding-agent/src/prompts/agents/task.md)
+- [`src/prompts/agents/redteam.md`](../packages/coding-agent/src/prompts/agents/redteam.md) and the other red-team specialist definitions
 - [`src/prompts/tools/task.md`](../packages/coding-agent/src/prompts/tools/task.md)
+- [`src/prompts/tools/task-redteam.md`](../packages/coding-agent/src/prompts/tools/task-redteam.md)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/config.ts`](../packages/coding-agent/src/config.ts)
 - [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts)
@@ -39,31 +41,27 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 
 ## Bundled agents
 
-Bundled agents are embedded at build time (`src/task/agents.ts`) using text imports.
+Bundled agents are embedded at build time (`src/task/agents.ts`) using text imports and selected by `AgentMode`.
 
-`EMBEDDED_AGENT_DEFS` defines:
-
-- `explore`, `plan`, `designer`, `reviewer`, `librarian`, `oracle` from prompt files
-- `task` and `sonic` from shared `task.md` body plus injected frontmatter
+The `coding` roster contains `task`, `sonic`, `explore`, `plan`, `designer`, `reviewer`, `librarian`, and the remaining generic specialists. The `redteam` roster appends `redteam`, `recon`, `validator`, `finding-reviewer`, `vuln-librarian`, `attack-planner`, and `report-designer`. In an unrestricted red-team session, omitting `agent` selects `redteam`; the generic `task` agent remains available by name. An explicit parent `spawns` list still selects its first allowed name as the default.
 
 Loading path:
 
-1. `loadBundledAgents()` parses embedded markdown with `parseAgent(..., "bundled", "fatal")`
-2. results are cached in-memory (`bundledAgentsCache`)
-3. `clearBundledAgentsCache()` is test-only cache reset
+1. `loadBundledAgents(agentMode)` parses the selected embedded markdown with `parseAgent(..., "bundled", "fatal")`.
+2. Results are cached in-memory per profile.
+3. `clearBundledAgentsCache()` is a test-only cache reset.
 
-Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter throws and can fail discovery entirely.
+`omp agents unpack --mode coding|redteam` exports the selected built-in roster. Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter throws and can fail discovery entirely.
 
 ## Filesystem and plugin discovery
 
-`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots and Claude plugin roots before appending bundled definitions. Cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped — their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters both dir lists).
+`discoverAgents(cwd, home, agentMode)` (`src/task/discovery.ts`) merges agents from OMP-native roots and Claude plugin roots before appending the selected bundled definitions. Cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped — their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters both dir lists).
 
 ### Discovery inputs
-
 1. Nearest project `.omp` agents dir from `findAllNearestProjectConfigDirs("agents", cwd)` (filtered to `.omp`; first hit only)
 2. User `.omp` agents dir from `getConfigDirs("agents", { project: false })` (filtered to `.omp`; first hit only)
 3. Claude plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
-4. Bundled agents (`loadBundledAgents()`)
+4. Profile-selected bundled agents (`loadBundledAgents(agentMode)`)
 
 ### Actual source order
 
@@ -111,7 +109,7 @@ Lookup is exact-name linear search:
 
 In spawn execution (`TaskTool.#executeSync` → `#runSpawn`):
 
-1. agents are rediscovered at execution time (`discoverAgents(this.session.cwd)`)
+1. agents are rediscovered at execution time with the parent session's persisted profile (`discoverAgents(this.session.cwd, home, this.session.agentMode)`)
 2. requested `params.agent` is resolved through `getAgent`
 3. missing agent returns immediate tool response:
    - `Unknown agent "...". Available: ...`
@@ -119,7 +117,7 @@ In spawn execution (`TaskTool.#executeSync` → `#runSpawn`):
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` builds the tool description from discovery results at initialization time. `#executeSync` rediscovers agents, so the runtime set can differ from what was listed in the earlier tool description if agent files changed mid-session. The async entry path still uses the initialization-time list to decide whether an agent is marked `blocking` before scheduling.
+`TaskTool.create()` builds the tool description from profile-keyed discovery results at initialization time. `#executeSync` rediscovers agents with the same persisted session profile, so the runtime set can differ from what was listed in the earlier tool description if agent files changed mid-session. The async entry path still uses the initialization-time list to decide whether an agent is marked `blocking` before scheduling.
 
 ## Structured-output guardrails and schema precedence
 
@@ -182,6 +180,7 @@ So deeper levels cannot spawn further tasks even if the agent definition include
 When parent plan mode is enabled, `TaskTool.#runSpawn` builds an `effectiveAgent` before launching subprocesses:
 
 - prepends the plan-mode subagent system prompt
+- selects the generic or red-team plan-mode subagent wrapper from the parent session profile
 - restricts tools to `read`, `search`, `find`, `lsp`, and `web_search`, plus `ast_grep`/`report_finding` when the agent's own tool list declares them (`PLAN_MODE_AGENT_TOOL_ALLOWLIST`)
 - clears child spawns
 

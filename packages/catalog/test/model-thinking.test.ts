@@ -37,6 +37,24 @@ function createModel<TApi extends Api>(overrides: {
 }
 
 describe("model thinking derivation", () => {
+	it("pins Grok 4.5 to mandatory low, medium, or high reasoning", () => {
+		const model = createModel({
+			id: "grok-4.5",
+			api: "openai-responses",
+			provider: "xai-oauth",
+			baseUrl: "https://api.x.ai/v1",
+		});
+
+		expect(model.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+		});
+		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Low);
+		expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.High);
+	});
+
 	it("stores supported efforts for Codex mini in model metadata", () => {
 		const model = createModel({
 			id: "gpt-5.1-codex-mini",

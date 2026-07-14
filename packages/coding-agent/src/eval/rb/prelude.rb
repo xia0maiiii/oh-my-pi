@@ -392,7 +392,7 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     schema.nil? ? text : JSON.parse(text)
   end
 
-  def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, isolated: nil, apply: nil, merge: nil, handle: false)
+  def agent(prompt, agent: nil, model: nil, label: nil, schema: nil, isolated: nil, apply: nil, merge: nil, handle: false)
     args = { "prompt" => prompt }
     args["agent"] = agent unless agent.nil?
     args["model"] = model unless model.nil?

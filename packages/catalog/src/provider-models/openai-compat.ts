@@ -969,6 +969,12 @@ interface XAICuratedModel {
 // OpenAI-family endpoint consumes the same constraint.
 export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
 	{
+		id: "grok-4.5",
+		contextWindow: 500_000,
+		name: "Grok 4.5",
+		input: ["text", "image"],
+	},
+	{
 		id: "grok-build",
 		contextWindow: 512_000,
 		name: "Grok Build",

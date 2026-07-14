@@ -10,6 +10,7 @@ import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
+import type { AgentMode } from "../config/agent-mode";
 import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
@@ -31,6 +32,12 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import subagentRedteamSystemPromptTemplate from "../prompts/system/subagent-redteam-system-prompt.md" with {
+	type: "text",
+};
+import subagentRedteamSubmitReminderTemplate from "../prompts/system/subagent-redteam-yield-reminder.md" with {
+	type: "text",
+};
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -272,6 +279,8 @@ function getReportFindingKey(value: unknown): string | null {
 export interface ExecutorOptions {
 	cwd: string;
 	worktree?: string;
+	/** Session-start behavior profile inherited from the parent. */
+	agentMode?: AgentMode;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -1558,7 +1567,9 @@ async function driveSessionToYield(
 			if (lastBeforeReminder?.stopReason === "error") break;
 			try {
 				retryCount++;
-				const reminder = prompt.render(submitReminderTemplate, {
+				const reminderTemplate =
+					session.agentMode === "redteam" ? subagentRedteamSubmitReminderTemplate : submitReminderTemplate;
+				const reminder = prompt.render(reminderTemplate, {
 					retryCount,
 					maxRetries: MAX_YIELD_RETRIES,
 				});
@@ -1903,6 +1914,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
 		options.parentServiceTier,
 	);
+	const agentMode = options.agentMode ?? subagentSettings.get("agentMode");
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	// Tailored specialist identity for this spawn. `subagentRole` is the full
 	// (trimmed) role text fed to the system-prompt preamble; `subagentDisplayName`
@@ -2172,6 +2184,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// artifacts dir) — only the SessionManager differs.
 			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				agentMode,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,
@@ -2193,7 +2206,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+					const systemPromptTemplate =
+						agentMode === "redteam" ? subagentRedteamSystemPromptTemplate : subagentSystemPromptTemplate;
+					const subagentPrompt = prompt.render(systemPromptTemplate, {
 						agent: agent.systemPrompt,
 						role: subagentRole ? oneLineLabel(subagentRole) : "",
 						context: options.context?.trim() ?? "",

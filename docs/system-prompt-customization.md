@@ -1,23 +1,26 @@
 # System Prompt Customization
 
-How the coding-agent assembles the system prompt sent to the model, and what users can control via `SYSTEM.md`, `APPEND_SYSTEM.md`, and the matching CLI flags.
+How the coding-agent selects a session behavior profile, assembles the system prompt sent to the model, and applies `SYSTEM.md`, `APPEND_SYSTEM.md`, and the matching CLI flags.
 
 Primary implementation:
 
 - `packages/coding-agent/src/system-prompt.ts` (`buildSystemPrompt`, `loadSystemPromptFiles`)
 - `packages/coding-agent/src/main.ts` (`discoverSystemPromptFile`, `discoverAppendSystemPromptFile`)
+- `packages/coding-agent/src/config/agent-mode.ts` (profile values and session-resolution precedence)
 - `packages/coding-agent/src/prompts/system/system-prompt.md` (default stable instruction template)
 - `packages/coding-agent/src/prompts/system/custom-system-prompt.md` (internal custom-prompt template; not the normal CLI `SYSTEM.md` path)
+- `packages/coding-agent/src/prompts/system/redteam-profile.md` (red-team behavior layer)
 - `packages/coding-agent/src/prompts/system/project-prompt.md` (project/environment footer)
 
 ---
 
 ## 1) Inputs
 
-Four user-controllable inputs feed prompt assembly. All four resolve a value as either a literal string or, if the argument looks like a file path, the contents of that file (`resolvePromptInput`).
+Four prompt-text inputs feed prompt assembly. Each resolves a value as either a literal string or, if the argument looks like a file path, the contents of that file (`resolvePromptInput`). A separate session-profile input selects the built-in behavior layer.
 
 | Input | Source | Effect |
 |---|---|---|
+| `--agent-mode coding\|redteam` / `agentMode` setting | CLI flag or settings | Selects the behavior profile for a new session. `redteam` is the default. |
 | `--system-prompt <text-or-file>` | CLI flag | Replaces block 0: the default stable instructions. Highest precedence. |
 | `SYSTEM.md` | `<cwd>/.omp/SYSTEM.md`, then `~/.omp/agent/SYSTEM.md` (and equivalent paths under `.claude`, `.codex`, `.gemini`) | Same effect as `--system-prompt`; used when the flag is absent. |
 | `--append-system-prompt <text-or-file>` | CLI flag | Adds a prompt block. Without a custom system prompt it goes after all default blocks; with one it goes after the custom block and before the preserved project/environment footer. |
@@ -33,34 +36,36 @@ Precedence (highest first):
 
 For append, the same precedence applies between `--append-system-prompt`, project `APPEND_SYSTEM.md`, and user `APPEND_SYSTEM.md`.
 
+### Session profile resolution
+
+`agentMode` is resolved once for the session and written to the session header. Existing session metadata wins over a startup flag or the current setting, so resume, branch, and in-session new-session flows cannot silently change behavior. `--agent-mode` selects the profile for a session that does not already carry one; `/settings` changes apply to future top-level sessions.
+
+The `coding` profile uses the generic coding prompts and bundled agent roster. The `redteam` profile keeps those shared tools and coding agents, then adds a dedicated penetration-testing behavior block, red-team task specialists, and profile-specific advisor, plan, goal, review, task, orchestration, and subagent guidance.
+
 ---
 
 ## 2) Replace vs. append
 
-Normal CLI startup builds the default provider-facing prompt blocks first, then applies CLI / discovered file overrides in `packages/coding-agent/src/main.ts`:
+Normal CLI startup resolves the two prompt files/flags in `packages/coding-agent/src/main.ts`, then passes their text into the SDK without constructing provider-facing blocks:
 
 ```ts
-if (resolvedSystemPrompt && resolvedAppendPrompt) {
-  options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, resolvedAppendPrompt, ...defaultPrompt.slice(1)];
-} else if (resolvedSystemPrompt) {
-  options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, ...defaultPrompt.slice(1)];
-} else if (resolvedAppendPrompt) {
-  options.systemPrompt = defaultPrompt => [...defaultPrompt, resolvedAppendPrompt];
-}
+if (resolvedSystemPrompt) options.customSystemPrompt = resolvedSystemPrompt;
+if (resolvedAppendPrompt) options.appendSystemPrompt = resolvedAppendPrompt;
 ```
 
-The default blocks come from `buildSystemPrompt`:
+`buildSystemPrompt` owns the actual block assembly:
 
-- block 0: `system-prompt.md` — the stable default instructions (staff-engineer preamble, tool inventory, exploration rules, workflow rules, etc.);
-- block 1, when non-empty: `project-prompt.md` — dynamic project/environment context (workstation info, context files, dir-context list, workspace tree, current date/cwd, and other project footer content).
+- Without a custom system prompt, block 0 is `system-prompt.md`, the stable generic instructions. A `redteam-profile.md` block follows only for `agentMode: redteam`. `project-prompt.md` then renders dynamic project/environment context; when an append prompt exists, that text is rendered at the end of this same project/footer block.
+- With a custom system prompt, `custom-system-prompt.md` renders the custom text, append text, discovered context, skills, and rules together in block 0. The built-in generic and red-team base-prompt blocks are omitted. `project-prompt.md` still contributes the reduced environment/cwd/workspace footer as the next non-empty block.
+- Active repository context, when present, is appended as a final independent block in either path.
 
 Consequences for normal CLI use:
 
-- Providing `--system-prompt` or `SYSTEM.md` replaces only block 0. The stable default instructions are removed, but the dynamic project/environment footer from `project-prompt.md` remains as `defaultPrompt.slice(1)`.
-- Providing `--append-system-prompt` or `APPEND_SYSTEM.md` without a custom system prompt appends a new block after all default blocks.
-- Providing both a custom system prompt and an append prompt produces: custom system prompt block, append prompt block, then the preserved dynamic project/environment footer.
+- `--system-prompt` or `SYSTEM.md` replaces the built-in base instructions while preserving dynamic project/environment context.
+- `--append-system-prompt` or `APPEND_SYSTEM.md` keeps the built-in base instructions. Without a custom prompt its text lives inside the project/footer block; with a custom prompt it lives inside the custom wrapper block.
+- Suppressing `redteam-profile.md` through a custom system prompt does not change the persisted session profile. Profile-specific task agents, review routing, and runtime notices still follow `agentMode`.
 
-If you want to keep both default blocks and add to them, use `--append-system-prompt` / `APPEND_SYSTEM.md` without `--system-prompt` / `SYSTEM.md`. If you want to replace the stable default instructions while keeping the dynamic footer, use `--system-prompt` / `SYSTEM.md`.
+Use `--append-system-prompt` / `APPEND_SYSTEM.md` when you want to retain the built-in instructions. Use `--system-prompt` / `SYSTEM.md` when you intentionally want to replace them.
 
 ---
 

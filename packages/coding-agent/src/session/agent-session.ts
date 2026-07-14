@@ -163,6 +163,7 @@ import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../a
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
+import { type AgentMode, resolveAgentMode } from "../config/agent-mode";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -240,7 +241,7 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
-import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
+import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
@@ -248,12 +249,14 @@ import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/ut
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
+import redteamAdvisorSystemPrompt from "../prompts/advisor/redteam-system.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
+import eagerTaskRedteamPrompt from "../prompts/system/eager-task-redteam.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
@@ -262,6 +265,7 @@ import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { typ
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
+import planModeRedteamActivePrompt from "../prompts/system/plan-mode-redteam-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
 	type: "text",
@@ -668,6 +672,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Session-start behavior profile. */
+	agentMode?: AgentMode;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -1546,6 +1552,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly agentMode: AgentMode;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	#autoApprove: boolean;
@@ -2042,6 +2049,12 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.agentMode = resolveAgentMode(
+			config.agentMode,
+			this.sessionManager.getHeader()?.agentMode,
+			this.settings.get("agentMode"),
+		);
+		this.sessionManager.setAgentMode(this.agentMode);
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -2227,6 +2240,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#syncTodoPhasesFromBranch();
 		this.#goalRuntime = new GoalRuntime({
+			agentMode: this.agentMode,
 			getState: () => this.#goalModeState,
 			setState: state => {
 				this.#goalModeState = state;
@@ -2467,7 +2481,7 @@ export class AgentSession {
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [advisorSystemPrompt];
+			const systemPrompt = [this.agentMode === "redteam" ? redteamAdvisorSystemPrompt : advisorSystemPrompt];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
@@ -7208,7 +7222,8 @@ export class AgentSession {
 				: sessionPlanUrl;
 
 		const planExists = fs.existsSync(resolvedPlanPath);
-		const content = prompt.render(planModeActivePrompt, {
+		const planModeTemplate = this.agentMode === "redteam" ? planModeRedteamActivePrompt : planModeActivePrompt;
+		const content = prompt.render(planModeTemplate, {
 			planFilePath: displayPlanPath,
 			planExists,
 			askToolName: "ask",
@@ -7393,7 +7408,7 @@ export class AgentSession {
 			keywordNotices.push({
 				role: "custom",
 				customType: "orchestrate-notice",
-				content: ORCHESTRATE_NOTICE,
+				content: renderOrchestrateNotice(this.agentMode),
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -7407,7 +7422,10 @@ export class AgentSession {
 			keywordNotices.push({
 				role: "custom",
 				customType: "workflow-notice",
-				content: renderWorkflowNotice({ taskBatch: this.settings.get("task.batch") }),
+				content: renderWorkflowNotice({
+					taskBatch: this.settings.get("task.batch"),
+					agentMode: this.agentMode,
+				}),
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -11258,7 +11276,10 @@ export class AgentSession {
 		return {
 			role: "custom",
 			customType: "eager-task-prelude",
-			content: prompt.render(eagerTaskPrompt, this.#buildEagerPreludeContext()),
+			content: prompt.render(
+				this.agentMode === "redteam" ? eagerTaskRedteamPrompt : eagerTaskPrompt,
+				this.#buildEagerPreludeContext(),
+			),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -14629,6 +14650,12 @@ export class AgentSession {
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
+		const targetHeader = await this.sessionManager.readSessionHeader(sessionPath);
+		if (targetHeader?.agentMode && targetHeader.agentMode !== this.agentMode) {
+			throw new Error(
+				`Cannot switch from a ${this.agentMode} session to a ${targetHeader.agentMode} session in place. Resume it in a new session with agentMode=${targetHeader.agentMode}.`,
+			);
+		}
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -14695,6 +14722,7 @@ export class AgentSession {
 
 		try {
 			await this.sessionManager.setSessionFile(sessionPath);
+			this.sessionManager.setAgentMode(this.agentMode);
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
 			}

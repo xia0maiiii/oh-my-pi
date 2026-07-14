@@ -59,8 +59,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`  | Xiaomi MiMo Token Plan auth (CN)                 | Using `xiaomi-token-plan-cn` provider                          |                                                                                                     |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | Xiaomi MiMo Token Plan auth (SGP)                | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                     |
 | `MOONSHOT_API_KEY`              | Moonshot auth                                    | Using `moonshot` provider                                      |                                                                                                     |
-| `XAI_API_KEY`                   | xAI auth                                         | Using xAI models or as fallback for `xai-oauth`                |                                                                                                     |
-| `XAI_OAUTH_TOKEN`               | xAI OAuth/SuperGrok auth                         | Using `xai-oauth` provider                                     | Takes precedence over `XAI_API_KEY` for `xai-oauth`                                                 |
+| `XAI_API_KEY`                   | xAI auth                                         | Using xAI models or as fallback for `xai-oauth`                | Not accepted by the built-in `web_search`, which requires stored Grok subscription OAuth            |
+| `XAI_OAUTH_TOKEN`               | xAI OAuth/SuperGrok auth                         | Using `xai-oauth` provider                                     | Takes precedence over `XAI_API_KEY` for general provider resolution; not accepted by built-in `web_search` |
 | `OPENROUTER_API_KEY`            | OpenRouter auth                                  | Using OpenRouter models                                        | Also used by image tool when preferred/auto provider is OpenRouter                                  |
 | `MISTRAL_API_KEY`               | Mistral auth                                     | Using Mistral models                                           |                                                                                                     |
 | `ZAI_API_KEY`                   | z.ai auth                                        | Using z.ai models                                              | Also used by z.ai web search provider                                                               |
@@ -233,10 +233,15 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 ## 3) Web search subsystem
 
+The built-in `web_search` is hard-locked to xAI and resolves only a stored `xai-oauth` credential from `agent.db` or the configured auth broker. Authenticate through `/login` → **xAI Grok OAuth (SuperGrok or X Premium+)**. Environment-only `XAI_OAUTH_TOKEN`, `XAI_API_KEY`, plain `xai` credentials, and static keys stored under `xai-oauth` do not authorize this tool, and it never falls back to another provider.
+
+The variables below apply only to provider adapters retained for direct calls, compatibility, and testing; the built-in tool does not select those adapters.
+
 ### Search provider credentials
 
 | Variable                                            | Used by                                                       |
 | --------------------------------------------------- | ------------------------------------------------------------- |
+| `XAI_API_KEY`, `XAI_OAUTH_TOKEN`                    | xAI model/provider compatibility paths; not built-in search   |
 | `EXA_API_KEY`                                       | Exa search provider and Exa MCP tools                         |
 | `BRAVE_API_KEY`                                     | Brave search provider                                         |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                       |

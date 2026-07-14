@@ -1,12 +1,12 @@
 # web_search
 
-> Run one web query through the first available search provider and return LLM-formatted answer, source URLs, and optional citations.
+> Run one web query through xAI Grok using a stored Grok OAuth subscription and return an LLM-formatted answer, source URLs, and optional citations.
 
 ## Source
 - Entry: `packages/coding-agent/src/web/search/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/web-search.md`
 - Key collaborators:
-  - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
+  - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry retained for adapter compatibility and direct testing.
   - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
   - `packages/coding-agent/src/web/search/render.ts` — TUI renderer details type.
   - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
@@ -38,11 +38,11 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Search query, passed to providers unchanged. |
-| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Time filter. Only providers that implement it use it; code maps it for Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, and xAI. |
-| `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing; xAI sends it as `search_parameters.max_search_results` when `num_search_results` is absent and also caps parsed sources/citations locally, defaulting to `10` and max `30`. |
-| `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
-| `temperature` | `number` | No | Passed through only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
-| `num_search_results` | `number` | No | Requested search breadth or local result cap. Most providers send it upstream. TinyFish clamps to `1..20` with default `10`, sends it as `num_results` per page, and uses paginated fetches before slicing. xAI sends it as `search_parameters.max_search_results` and caps parsed sources/citations locally with default `10` and max `30`. |
+| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Accepted by the shared schema; the built-in xAI adapter currently ignores it. |
+| `limit` | `number` | No | Local cap for returned xAI sources and citations when `num_search_results` is absent. |
+| `max_tokens` | `number` | No | Sent to xAI as `max_output_tokens`. |
+| `temperature` | `number` | No | Sent to xAI as `temperature`. |
+| `num_search_results` | `number` | No | Preferred local cap for returned xAI sources and citations; defaults to `10` and is capped at `30`. It is not sent upstream. |
 
 ## Outputs
 The tool returns a single text content block plus structured `details`.
@@ -63,40 +63,32 @@ The tool returns a single text content block plus structured `details`.
 - If related questions exist, a `## Related` bullet list follows.
 - If search queries exist, a `Search queries: <n>` section follows, capped to the first 3 queries and 120 chars each.
 
-Failure output is not thrown at the tool boundary when providers are unavailable or provider attempts fail. Instead the tool returns:
+Failure output is not thrown at the tool boundary when an explicit provider is rejected or the xAI attempt fails. Instead the tool returns:
 
 - `content[0].text = "Error: ..."`
-- `details.response.provider = <last attempted provider> | "none"`
+- `details.response.provider = "xai"` after an xAI attempt, or `"none"` when a disallowed explicit provider is rejected before dispatch.
 - `details.error = ...`
 
-Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `executeSearch()`, and `executeSearch()` passes it to providers. If the signal is aborted during fallback handling, `throwIfAborted(signal)` rethrows the cancellation instead of returning an `"Error: ..."` text result.
+Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `executeSearch()`, and `executeSearch()` passes it to xAI. If the signal is aborted during error handling, `throwIfAborted(signal)` rethrows the cancellation instead of returning an `"Error: ..."` text result.
 
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
-2. `executeSearch()` chooses a provider list:
-   - if `params.provider` is set and not `"auto"`, it loads that provider with `getSearchProvider()`; if `isExplicitlyAvailable()` returns true, the list is `[that provider]`, otherwise it falls back to `resolveProviderChain(authStorage, "auto")`.
-   - otherwise it calls `resolveProviderChain()` with the module-global preferred provider from `packages/coding-agent/src/web/search/provider.ts`.
-3. `resolveProviderChain()` lazily loads each provider module on demand and returns only available providers. If a preferred provider is set, it is tried first (gated by `isExplicitlyAvailable()`), then the static `SEARCH_PROVIDER_ORDER` excluding that provider, each gated by `isAvailable()`. Providers in the excluded set (`setExcludedSearchProviders()`) are skipped entirely, including as the preferred candidate.
-4. If no providers are available (for example, after excluding DuckDuckGo and lacking configured keyed/OAuth providers), `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
-5. For each provider in order, `executeSearch()` calls `provider.search()` with:
+2. `executeSearch()` accepts no provider selector, `"auto"`, or `"xai"`. Any other internal `params.provider` value returns `Error: Web search is locked to xAI Grok OAuth; provider "<id>" is not allowed.` without dispatching a request.
+3. The entry point loads only the `xai` adapter. It does not call `resolveProviderChain()`, consult exclusions, or fall back to another search provider.
+4. `executeSearch()` calls the xAI adapter with:
    - `query`,
    - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
    - `systemPrompt` from `packages/coding-agent/src/prompts/system/web-search.md`.
-6. A `SearchResponse` with no renderable content (`hasRenderableSearchContent()` returns false) is rejected as a `SearchProviderError` (status `204`) so the loop advances to the next provider. On the first response that has renderable content, `formatForLLM()` renders answer/sources/citations/related/search-queries into one text block and returns it with `details.response`.
-7. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
-8. After all candidates fail, `formatProviderError()` normalizes each error:
-   - Anthropic `404` becomes `Anthropic web search returned 404 (model or endpoint not found).`
-   - `401`/`403` become `<Provider> authorization failed ...` except Z.AI, which preserves its raw message.
-   - other `SearchProviderError`s surface `error.message`.
-9. If more than one provider was attempted, the final message is `All web search providers failed: <provider/error>; ...`; otherwise it is just the normalized last error.
+5. The adapter resolves only stored `xai-oauth` OAuth access through `withOAuthAccess()`. Missing, static, environment-only, or plain `xai` API-key credentials do not authorize the search.
+6. A response with no renderable content is converted to a `SearchProviderError` with status `204`; a renderable response is formatted by `formatForLLM()` and returned with `details.response`.
+7. An xAI failure is normalized into the returned `Error: ...` tool result. No other provider is attempted.
 
 ## Modes / Variants
 - **Provider selection**
-  - **Forced provider**: internal callers may pass `provider`; unavailable forced providers fall back to the auto chain instead of hard-failing (`packages/coding-agent/src/web/search/index.ts`). This field is not in the model-facing schema.
-  - **Preferred provider**: `setPreferredSearchProvider()` sets a module-global default used by `resolveProviderChain()`. `packages/coding-agent/src/sdk.ts` and `packages/coding-agent/src/modes/controllers/selector-controller.ts` wire this from settings.
-  - **Excluded providers**: `setExcludedSearchProviders()` records providers `resolveProviderChain()` must never return, including as fallbacks. Wired from the `providers.webSearchExclude` setting (`providers.webSearch` drives the preferred provider) in `packages/coding-agent/src/sdk.ts`, `packages/coding-agent/src/modes/interactive-mode.ts`, and `packages/coding-agent/src/modes/controllers/selector-controller.ts`.
-  - **Auto chain order** (18 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `duckduckgo` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
-- **Provider adapters**
+  - The built-in tool is hard-locked to `xai`; `"auto"` is a compatibility alias for the same route.
+  - The model-facing schema does not expose `provider`. Internal callers that pass any provider other than `"auto"` or `"xai"` receive a lock error instead of fallback behavior.
+  - `providers.webSearch`, `providers.webSearchExclude`, and the registry's auto chain do not change the built-in runtime route.
+- **Provider adapters retained for compatibility/direct testing**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
     - Availability: auth precedence is `PERPLEXITY_COOKIES` -> OAuth token in `agent.db` -> `PERPLEXITY_API_KEY` / `PPLX_API_KEY` -> anonymous ask-endpoint fallback. `isAvailable()` gates the auto chain on credentials, but `isExplicitlyAvailable()` is always true, so explicit selection works unauthenticated.
     - OAuth/cookie/anonymous mode: POSTs to `https://www.perplexity.ai/rest/sse/perplexity_ask`, consumes SSE, merges partial events, extracts answer and source URLs, sets `authMode: "oauth"` (`"anonymous"` for the unauthenticated fallback).
@@ -127,10 +119,12 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the streamed response has no `url_citation` annotations, the adapter falls back to scraping markdown links and bare URLs from the answer text.
   - **xAI** — `packages/coding-agent/src/web/search/providers/xai.ts`
-    - Availability: `XAI_API_KEY` or `agent.db` credential for `xai`.
-    - Querying: POST `https://api.x.ai/v1/responses` with model `grok-4.3` and `tools: [{ type: "web_search" }]` using the `/v1/responses` Agent Tools API.
-    - `max_tokens` and `temperature` pass through. `recency` is sent as `search_parameters.from_date`/`to_date`; `num_search_results` (or `limit` when absent) is sent as `search_parameters.max_search_results`. Because xAI citations may include every encountered URL, the adapter also locally caps returned `sources` and `citations` after parsing. The local cap uses `num_search_results` before `limit`, defaults to `10` when omitted/invalid/zero, and is capped at `30`.
-    - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode: "api_key"`.
+    - Availability: a stored OAuth credential for `xai-oauth` in `agent.db` or the configured auth broker. Authenticate with `/login` and select **xAI Grok OAuth (SuperGrok or X Premium+)**.
+    - `XAI_API_KEY`, `XAI_OAUTH_TOKEN`, plain `xai` credentials, and static keys stored under `xai-oauth` are not accepted by the built-in search path.
+    - Querying: POST `https://api.x.ai/v1/responses` with model `grok-4.5` and `tools: [{ type: "web_search" }]` using the `/v1/responses` Agent Tools API.
+    - `max_tokens` and `temperature` pass through. `recency` is ignored. `num_search_results` (or `limit` when absent) caps returned `sources` and `citations` locally, defaults to `10` when omitted/invalid/zero, and is capped at `30`; no `search_parameters` object is sent upstream.
+    - OAuth `401`/usage failures use the shared refresh-and-sibling-rotation policy without falling back to an API key or another search provider.
+    - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode: "oauth"`.
   - **Z.AI** — `packages/coding-agent/src/web/search/providers/zai.ts`
     - Availability: env or `agent.db` credential for `zai`.
     - Querying: JSON-RPC `tools/call` against `https://api.z.ai/api/mcp/web_search_prime/mcp` for remote MCP tool `web_search_prime`.
@@ -214,7 +208,7 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
   - Uses a module-global preferred-provider setting in the same file.
   - `packages/coding-agent/src/tools/index.ts` gates tool availability behind `session.settings.get("web_search.enabled")`.
 - Background work / cancellation
-  - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
+  - `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it to xAI and rethrows cancellation instead of converting it into a provider error. Compatibility adapters also accept `AbortSignal` when called directly.
 
 ## Limits & Caps
 - Provider auto-order length: 18 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
@@ -229,17 +223,18 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).
-- xAI local sources/citations cap and upstream `max_search_results`: `num_search_results` before `limit`, omitted/invalid/zero => local default `10`, max `30` (`packages/coding-agent/src/web/search/providers/xai.ts`).
+- xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => local default `10`, max `30`; no upstream result-count field is sent (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
 - Anthropic defaults: model `claude-haiku-4-5`, `DEFAULT_MAX_TOKENS = 4096` when the provider omits `max_tokens` (`packages/coding-agent/src/web/search/providers/anthropic.ts`).
 - Gemini retries: up to `3` retries per endpoint, base delay `1000` ms, rate-limit delay budget `5 * 60 * 1000` ms (`packages/coding-agent/src/web/search/providers/gemini.ts`).
 
 ## Errors
-- Tool-level no-provider case returns a normal tool result with `Error: No web search provider configured.`; it does not throw.
-- Tool-level all-failed case also returns a normal tool result with `Error: ...`; the message is either the single normalized provider error or a semicolon-separated summary of all failed providers.
+- A disallowed explicit provider returns a normal tool result containing the xAI lock error with `details.response.provider = "none"`; it does not throw.
+- An xAI failure returns a normal tool result with `Error: ...` and `details.response.provider = "xai"`; no fallback failures are appended.
 - Provider adapters usually throw `SearchProviderError(provider, message, status)` for HTTP or protocol failures.
 - Availability probes intentionally swallow lookup errors and report `false` in many providers via `isApiKeyAvailable()`.
 - Per-provider notable failures:
+  - xAI: missing stored OAuth returns `No xAI Grok OAuth subscription credential. Run /login → xAI Grok OAuth (SuperGrok or X Premium+).`; API-key credentials are not used as fallback.
   - Anthropic: missing credentials throw a plain `Error`; a `404` is remapped to a special final message by `formatProviderError()`.
   - Perplexity: missing auth throws a plain `Error`; OAuth stream `error_code` events become `SearchProviderError("perplexity", ...)`.
   - Gemini: auth refresh, endpoint fallback, and retry logic are internal; final exhausted failures surface as `SearchProviderError("gemini", ...)`.
@@ -248,10 +243,9 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
   - SearXNG `findAuth()` can throw configuration errors before any HTTP call if Basic auth fields are incomplete or invalid.
 
 ## Notes
-- The model-facing schema does not expose `provider`, but internal callers can force one through `SearchQueryParams`.
-- `resolveProviderChain()` lazily imports provider modules and caches singleton instances. Just asking for labels via `getSearchProviderLabel()` does not trigger those imports.
-- Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates with `page` when more results are needed. xAI sends that collapsed value as `search_parameters.max_search_results` and applies the same precedence locally after parsing to cap returned sources/citations (`10` default, `30` max).
-- `recency` is implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, and xAI. The model-facing prompt does not name specific providers.
-- `packages/coding-agent/src/config/settings-schema.ts` uses the shared `SEARCH_PROVIDER_PREFERENCES` / `SEARCH_PROVIDER_OPTIONS` metadata, so the settings selector and setup wizard expose `auto` plus every provider in the auto chain.
-- DuckDuckGo is intentionally last in the auto chain because it is always available without credentials.
+- The model-facing schema does not expose `provider`; internal callers may pass only `"auto"` or `"xai"` without receiving a lock error.
+- The compatibility registry still exposes `resolveProviderChain()` for direct adapter consumers, but the built-in tool bypasses it and loads only xAI.
+- Most compatibility adapters treat `limit` and `num_search_results` as the same number because they pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates with `page` when more results are needed. The built-in xAI adapter uses the same precedence only as a local returned-source/citation cap (`10` default, `30` max) and sends no upstream result-count field.
+- `recency` remains implemented by several compatibility adapters, but the built-in xAI adapter ignores it. The model-facing prompt does not name specific providers.
+- `packages/coding-agent/src/config/settings-schema.ts` exposes only `xai` and the compatibility alias `auto` for `providers.webSearch`; both reach the same built-in xAI route.
 - Exa uses `authStorage.getApiKey("exa")`, then `EXA_API_KEY`, then unauthenticated `https://mcp.exa.ai/mcp` fallback.
