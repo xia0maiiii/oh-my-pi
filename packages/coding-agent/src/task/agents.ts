@@ -5,17 +5,24 @@
  */
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import { parseAgentFields } from "../discovery/helpers";
+import attackPlannerMd from "../prompts/agents/attack-planner.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
+import findingReviewerMd from "../prompts/agents/finding-reviewer.md" with { type: "text" };
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
 import librarianMd from "../prompts/agents/librarian.md" with { type: "text" };
-
 import planMd from "../prompts/agents/plan.md" with { type: "text" };
+import reconMd from "../prompts/agents/recon.md" with { type: "text" };
+import redteamMd from "../prompts/agents/redteam.md" with { type: "text" };
+import reportDesignerMd from "../prompts/agents/report-designer.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import testerMd from "../prompts/agents/tester.md" with { type: "text" };
+import validatorMd from "../prompts/agents/validator.md" with { type: "text" };
+import vulnLibrarianMd from "../prompts/agents/vuln-librarian.md" with { type: "text" };
 
 import type { AgentDefinition, AgentSource } from "./types";
 
@@ -41,7 +48,7 @@ function buildAgentContent(def: EmbeddedAgentDef): string {
 	return prompt.render(agentFrontmatterTemplate, { ...def.frontmatter, body });
 }
 
-const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
+const CODING_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "explore.md", template: exploreMd },
 	{ fileName: "plan.md", template: planMd },
 	{ fileName: "designer.md", template: designerMd },
@@ -68,6 +75,16 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		},
 		template: taskMd,
 	},
+];
+
+const REDTEAM_AGENT_DEFS: EmbeddedAgentDef[] = [
+	{ fileName: "recon.md", template: reconMd },
+	{ fileName: "attack-planner.md", template: attackPlannerMd },
+	{ fileName: "finding-reviewer.md", template: findingReviewerMd },
+	{ fileName: "validator.md", template: validatorMd },
+	{ fileName: "vuln-librarian.md", template: vulnLibrarianMd },
+	{ fileName: "report-designer.md", template: reportDesignerMd },
+	{ fileName: "redteam.md", template: redteamMd },
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
@@ -120,46 +137,47 @@ export function parseAgent(
 	};
 }
 
-/** Cache for bundled agents */
-let bundledAgentsCache: AgentDefinition[] | null = null;
+/** Per-mode cache: a process may host coding and red-team sessions concurrently. */
+const bundledAgentsCache = new Map<AgentMode, AgentDefinition[]>();
 
 /**
- * Load all bundled agents from embedded content.
- * Results are cached after first load.
+ * Load bundled agents for a session profile.
+ * Red-team mode extends the generic coding roster with distinct specialist IDs;
+ * it never replaces the generic agent definitions.
  */
-export function loadBundledAgents(): AgentDefinition[] {
-	if (bundledAgentsCache !== null) {
-		return bundledAgentsCache;
-	}
-	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def =>
-		parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"),
-	);
-	return bundledAgentsCache;
+export function loadBundledAgents(agentMode: AgentMode = DEFAULT_AGENT_MODE): AgentDefinition[] {
+	const cached = bundledAgentsCache.get(agentMode);
+	if (cached) return cached;
+
+	const defs = agentMode === "redteam" ? [...CODING_AGENT_DEFS, ...REDTEAM_AGENT_DEFS] : CODING_AGENT_DEFS;
+	const agents = defs.map(def => parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"));
+	bundledAgentsCache.set(agentMode, agents);
+	return agents;
 }
 
 /**
  * Get a bundled agent by name.
  */
-export function getBundledAgent(name: string): AgentDefinition | undefined {
-	return loadBundledAgents().find(a => a.name === name);
+export function getBundledAgent(name: string, agentMode: AgentMode = DEFAULT_AGENT_MODE): AgentDefinition | undefined {
+	return loadBundledAgents(agentMode).find(agent => agent.name === name);
 }
 
 /**
  * Get all bundled agents as a map keyed by name.
  */
-export function getBundledAgentsMap(): Map<string, AgentDefinition> {
+export function getBundledAgentsMap(agentMode: AgentMode = DEFAULT_AGENT_MODE): Map<string, AgentDefinition> {
 	const map = new Map<string, AgentDefinition>();
-	for (const agent of loadBundledAgents()) {
+	for (const agent of loadBundledAgents(agentMode)) {
 		map.set(agent.name, agent);
 	}
 	return map;
 }
 
 /**
- * Clear the bundled agents cache (for testing).
+ * Clear every bundled-agent profile cache (for testing).
  */
 export function clearBundledAgentsCache(): void {
-	bundledAgentsCache = null;
+	bundledAgentsCache.clear();
 }
 
 // Re-export for backward compatibility

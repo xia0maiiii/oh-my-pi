@@ -1,5 +1,4 @@
-import { type ApiKey, type ApiKeyResolver, type AuthStorage, withAuth } from "@oh-my-pi/pi-ai";
-import { $env } from "@oh-my-pi/pi-utils";
+import { type AuthStorage, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { clampNumResults } from "../utils";
@@ -8,7 +7,7 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_RESPONSES_URL = "https://api.x.ai/v1/responses";
-const XAI_WEB_SEARCH_MODEL = "grok-4.3";
+const XAI_WEB_SEARCH_MODEL = "grok-4.5";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
 
@@ -218,58 +217,24 @@ function parseResponse(response: XAIResponsesResponse, resultCap: number): Searc
 		usage: parseUsage(response.usage),
 		model: response.model,
 		requestId: response.id,
-		authMode: "api_key",
-	};
-}
-
-/**
- * Prefer `xai-oauth` only when its resolver cannot be shadowed by the shared
- * `XAI_API_KEY` fallback before reaching a lower-priority dedicated source.
- */
-function shouldPreferXAIOAuth(authStorage: AuthStorage): boolean {
-	if ($env.XAI_OAUTH_TOKEN) return true;
-
-	const origin = authStorage.getCredentialOrigin("xai-oauth");
-	if (!origin || origin.kind === "env") return false;
-	if ((origin.kind === "api_key" || origin.kind === "fallback") && $env.XAI_API_KEY) return false;
-	return true;
-}
-
-function resolveXAIWebSearchApiKey(params: SearchParams): ApiKeyResolver {
-	const xaiResolver = params.authStorage.resolver("xai", {
-		sessionId: params.sessionId,
-	});
-	const xaiOAuthOrigin = params.authStorage.getCredentialOrigin("xai-oauth");
-	if (!shouldPreferXAIOAuth(params.authStorage)) {
-		return xaiResolver;
-	}
-
-	const xaiOAuthResolver = params.authStorage.resolver("xai-oauth", {
-		sessionId: params.sessionId,
-	});
-	return async ctx => {
-		const xaiOAuthKey = await xaiOAuthResolver(ctx);
-		if (xaiOAuthKey) {
-			const borrowedSharedEnvKey =
-				xaiOAuthOrigin?.kind === "oauth" &&
-				Boolean($env.XAI_API_KEY) &&
-				xaiOAuthKey === $env.XAI_API_KEY &&
-				xaiOAuthKey !== $env.XAI_OAUTH_TOKEN;
-			if (!borrowedSharedEnvKey) return xaiOAuthKey;
-		}
-		return xaiResolver(ctx);
+		authMode: "oauth",
 	};
 }
 
 /** Execute xAI Responses API web search. */
 export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = resolveXAIWebSearchApiKey(params);
-
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const response = await withAuth(keyOrResolver, (key: string) => callXAIResponses(key, params), {
-		signal: params.signal,
-		missingKeyMessage: 'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
-	});
+	const response = await withOAuthAccess(
+		params.authStorage,
+		"xai-oauth",
+		access => callXAIResponses(access.accessToken, params),
+		{
+			sessionId: params.sessionId,
+			signal: params.signal,
+			missingAccessMessage:
+				"No xAI Grok OAuth subscription credential. Run /login → xAI Grok OAuth (SuperGrok or X Premium+).",
+		},
+	);
 	return parseResponse(response, resultCap);
 }
 
@@ -279,7 +244,7 @@ export class XAIProvider extends SearchProvider {
 	readonly label = "xAI";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return shouldPreferXAIOAuth(authStorage) || authStorage.hasAuth("xai");
+		return authStorage.hasOAuth("xai-oauth");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

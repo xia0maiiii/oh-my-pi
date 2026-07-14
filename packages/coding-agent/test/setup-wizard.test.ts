@@ -15,7 +15,6 @@ import { WebSearchTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scene
 import { SetupWizardComponent } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/wizard-overlay";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -326,13 +325,15 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("exposes every web-search provider preference in the schema-backed TUI list", () => {
+	it("defaults to xAI and exposes only Grok-routed preferences", () => {
 		const schema = SETTINGS_SCHEMA["providers.webSearch"];
-		expect(schema.values).toEqual(SEARCH_PROVIDER_PREFERENCES);
-		expect(schema.ui.options).toEqual(SEARCH_PROVIDER_OPTIONS);
+		expect(schema.values).toEqual(["auto", "xai"]);
+		expect(schema.default).toBe("xai");
+		expect(schema.ui.options.map(option => option.value)).toEqual(["auto", "xai"]);
+		expect(Settings.isolated().get("providers.webSearch")).toBe("xai");
 	});
 
-	it("persists the highlighted provider as the web search preference", async () => {
+	it("persists the default xAI selection", async () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -346,17 +347,16 @@ describe("setup wizard web search tab", () => {
 		} as unknown as SetupSceneHost;
 
 		const tab = new WebSearchTab(host);
-		tab.handleInput("\x1b[B"); // move off "auto" to the next provider
 		tab.handleInput("\n"); // confirm the highlighted provider
 		await Bun.sleep(20);
 
-		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
-		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearch")).toBe(expected);
+		expect(settings.get("providers.webSearch")).toBe("xai");
+		expect(settings.isConfigured("providers.webSearch")).toBe(true);
 	});
 
-	it("can select the last provider in the setup TUI list", async () => {
+	it("can move from the auto alias to xAI", async () => {
 		const settings = Settings.isolated();
+		settings.set("providers.webSearch", "auto");
 		const host = {
 			ctx: {
 				settings,
@@ -369,14 +369,11 @@ describe("setup wizard web search tab", () => {
 		} as unknown as SetupSceneHost;
 
 		const tab = new WebSearchTab(host);
-		for (let i = 1; i < SEARCH_PROVIDER_OPTIONS.length; i++) {
-			tab.handleInput("\x1b[B");
-		}
+		tab.handleInput("\x1b[B");
 		tab.handleInput("\n");
 		await Bun.sleep(20);
 
-		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
-		expect(settings.get("providers.webSearch")).toBe(lastOption.value);
+		expect(settings.get("providers.webSearch")).toBe("xai");
 	});
 });
 

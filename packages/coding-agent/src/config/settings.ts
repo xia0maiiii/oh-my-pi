@@ -44,6 +44,7 @@ import {
 	type SettingValue,
 } from "./settings-schema";
 
+export * from "./agent-mode";
 // Re-export types that callers need
 export type * from "./settings-schema";
 export * from "./settings-schema";
@@ -605,7 +606,9 @@ export class Settings {
 	 * Set a model role (helper for modelRoles record).
 	 */
 	setModelRole(role: ModelRole | string, modelId: string): void {
-		const current = this.#modelRolesFromLayer(this.#global);
+		const globalRoles = getByPath(this.#global, ["modelRoles"]);
+		const current =
+			globalRoles === undefined ? { ...getDefault("modelRoles") } : this.#modelRolesFromLayer(this.#global);
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		const updateRuntimeOverride =
 			!!runtimeOverrides &&
@@ -654,7 +657,12 @@ export class Settings {
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
-		const next = this.#modelRolesFromLayer(this.#overrides);
+		const next: Record<string, string> = {};
+		for (const [role, modelId] of Object.entries(this.getModelRoles())) {
+			if (modelId) {
+				next[role] = modelId;
+			}
+		}
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
 				next[role] = modelId;

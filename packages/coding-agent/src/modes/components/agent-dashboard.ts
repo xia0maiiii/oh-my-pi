@@ -36,6 +36,7 @@ import {
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirs } from "../../config";
+import type { AgentMode } from "../../config/agent-mode";
 import type { ModelRegistry } from "../../config/model-registry";
 import {
 	formatModelString,
@@ -43,8 +44,11 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
-import { Settings } from "../../config/settings";
+import { DEFAULT_AGENT_MODE, Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
+import agentCreationRedteamArchitectPrompt from "../../prompts/system/agent-creation-redteam-architect.md" with {
+	type: "text",
+};
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
 import { discoverAgents } from "../../task/discovery";
@@ -87,6 +91,7 @@ interface GeneratedAgentSpec {
 }
 
 interface AgentDashboardModelContext {
+	agentMode?: AgentMode;
 	modelRegistry?: ModelRegistry;
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
@@ -407,7 +412,8 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd);
+			const agentMode = this.modelContext.agentMode ?? this.#settingsManager?.get("agentMode") ?? DEFAULT_AGENT_MODE;
+			const { agents } = await discoverAgents(this.cwd, undefined, agentMode);
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 
@@ -693,11 +699,14 @@ export class AgentDashboard extends Container {
 			throw new Error("No available model to generate agent specification.");
 		}
 
-		const systemPrompt = prompt.render(agentCreationArchitectPrompt, {});
+		const architectPrompt =
+			this.modelContext.agentMode === "redteam" ? agentCreationRedteamArchitectPrompt : agentCreationArchitectPrompt;
+		const systemPrompt = prompt.render(architectPrompt, {});
 		const userPrompt = prompt.render(agentCreationUserPrompt, { request: description });
 
 		const { session } = await createAgentSession({
 			cwd: this.cwd,
+			agentMode: this.modelContext.agentMode,
 			authStorage: modelRegistry.authStorage,
 			modelRegistry,
 			settings,

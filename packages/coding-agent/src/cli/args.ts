@@ -3,6 +3,7 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import type { AgentMode } from "../config/agent-mode";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -21,6 +22,7 @@ export interface Args {
 	profile?: string;
 	alias?: string;
 	allowHome?: boolean;
+	agentMode?: AgentMode;
 	provider?: string;
 	model?: string;
 	config?: string[];

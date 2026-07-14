@@ -188,12 +188,14 @@ Both runtimes expose `completion()` — a single stateless completion against a 
 
 ### Subagent helper (`agent`)
 
-Both runtimes expose `agent()` — a single subagent invocation routed through `packages/coding-agent/src/eval/agent-bridge.ts` into the same `runSubprocess(...)` path used by the `task` tool. It uses the current eval session's spawn policy and inherits the parent eval executor id, so parent and subagent code share JS/Python runtime state.
+Enabled eval runtimes expose `agent()` — a single subagent invocation routed through `packages/coding-agent/src/eval/agent-bridge.ts` into the same `runSubprocess(...)` path used by the `task` tool. It uses the current eval session's spawn policy and inherits the parent eval executor id, so parent and subagent code share runtime state.
 
 - Signatures:
   - JS: `await agent(prompt, agent?, model?, label?, schema?)` or `await agent(prompt, { agent?, model?, label?, schema?, handle? })`
-  - Python: `agent(prompt, *, agent="task", model=None, label=None, schema=None, handle=False)`
-- `agent` defaults to the bundled `task` agent and resolves through normal agent discovery, so project and user agents work.
+  - Python: `agent(prompt, *, agent=None, model=None, label=None, schema=None, handle=False)`
+  - Ruby: `agent(prompt, agent: nil, model: nil, label: nil, schema: nil, handle: false)`
+  - Julia: `agent(prompt; agent=nothing, model=nothing, label=nothing, schema=nothing, handle=false)`
+- When `agent` is omitted under unrestricted spawning, the session profile selects the bundled default: `task` for `coding`, `redteam` for `redteam`. An explicit parent `spawns` list still uses its first allowed agent. Passing `agent` always requests that exact discovered definition, so project and user agents continue to work.
 - `model` overrides the selected agent's model. Without it, normal per-agent settings and the agent frontmatter model apply.
 - Shared background is passed via files: write a `local://` file and reference it in the prompt. `label` controls the `agent://<id>` output label prefix.
 - `schema` passes a JSON Schema to the subagent structured-output path. When present, the helper parses the final JSON text and returns an object.

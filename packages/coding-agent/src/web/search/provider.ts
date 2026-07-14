@@ -133,6 +133,9 @@ export function formatSearchProviderFailure(error: unknown, provider: Pick<Searc
 			if (error.provider === "zai") {
 				return error.message;
 			}
+			if (error.provider === "xai") {
+				return `xAI Grok OAuth authorization failed (${error.status}). Re-run /login and verify the account has SuperGrok or X Premium+.`;
+			}
 			return `${getSearchProviderLabel(error.provider)} authorization failed (${error.status}). Check API key or base URL.`;
 		}
 		return error.message;

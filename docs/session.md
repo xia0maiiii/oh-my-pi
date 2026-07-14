@@ -73,10 +73,11 @@ Session files are JSONL: one JSON object per line.
 ```json
 {
   "type": "session",
-  "version": 3,
+  "version": 4,
   "id": "1f9d2a6b9c0d1234",
   "timestamp": "2026-02-16T10:20:30.000Z",
   "cwd": "/work/pi",
+  "agentMode": "coding",
   "title": "optional session title",
   "titleSource": "auto",
   "parentSession": "optional lineage marker"
@@ -86,6 +87,7 @@ Session files are JSONL: one JSON object per line.
 Notes:
 
 - `version` is optional in v1 files; absence means v1.
+- `agentMode` is `"coding"` or `"redteam"` and pins the session's behavior profile across resume, branch, and new-session flows. A newly created empty header can omit it until SDK/session initialization resolves the requested profile; v1–v3 migration supplies `"coding"` instead.
 - `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat as metadata, not a typed foreign key.
 
 ### Entry Base (`SessionEntryBase`)
@@ -334,7 +336,7 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 ## Versioning and Migration
 
-Current session version: `3`.
+Current session version: `4`.
 
 ### v1 -> v2
 
@@ -352,6 +354,14 @@ Applied when header `version < 3`:
 - For `message` entries: rewrites legacy `message.role === "hookMessage"` to `"custom"`.
 - Sets header `version = 3`.
 
+### v3 -> v4
+
+Applied when header `version < 4`:
+
+- Sets missing `agentMode` to `"coding"` so sessions created before profiles retain their historical behavior.
+- Preserves an existing `agentMode`.
+- Sets header `version = 4`.
+
 ### Migration Trigger and Persistence
 
 - Migrations run during session load (`setSessionFile`).
@@ -365,6 +375,7 @@ Applied when header `version < 3`:
 - Missing file (`ENOENT`) -> returns `[]`.
 - Non-parseable lines are handled by lenient JSONL parser (`parseJsonlLenient`).
 - If first parsed entry is not a valid session header (`type !== "session"` or missing string `id`) -> returns `[]`.
+- `readSessionHeaderFromFile(path)` reads only the title/header prefix and applies the same migrations to that header in memory. This lets resume/switch guards treat legacy v1–v3 files as `coding` without materializing history; the lightweight read does not itself rewrite the file.
 
 `SessionManager.setSessionFile()` behavior:
 

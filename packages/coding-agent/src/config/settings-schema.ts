@@ -35,7 +35,8 @@ import {
 	TTS_LOCAL_VOICE_VALUES,
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES, type SearchProviderId } from "../web/search/types";
+import { SEARCH_PROVIDER_OPTIONS, type SearchProviderId } from "../web/search/types";
+import { AGENT_MODES, DEFAULT_AGENT_MODE } from "./agent-mode";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -282,7 +283,15 @@ export interface ModelTagsSettings {
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
-const EMPTY_STRING_RECORD: Record<string, string> = {};
+export const DEFAULT_MODEL_ROLES: Record<string, string> = {
+	default: "openai-codex/gpt-5.6-sol:high",
+	smol: "xai-oauth/grok-4.5:high",
+	slow: "xai-oauth/grok-4.5:high",
+	plan: "openai-codex/gpt-5.6-sol:xhigh",
+	designer: "openai-codex/gpt-5.6-sol:xhigh",
+	tiny: "xai-oauth/grok-4.5:off",
+	advisor: "openai-codex/gpt-5.6-sol:xhigh",
+};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["job", "irc"];
@@ -479,7 +488,7 @@ export const SETTINGS_SCHEMA = {
 
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
-	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
+	modelRoles: { type: "record", default: DEFAULT_MODEL_ROLES },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
@@ -1092,6 +1101,30 @@ export const SETTINGS_SCHEMA = {
 			label: "Include Workspace Tree",
 			description:
 				"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+		},
+	},
+
+	agentMode: {
+		type: "enum",
+		values: AGENT_MODES,
+		default: DEFAULT_AGENT_MODE,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Agent Mode",
+			description: "Session-start behavior profile for prompts, workflows, and bundled agents",
+			options: [
+				{
+					value: "coding",
+					label: "Coding",
+					description: "General software engineering, repository maintenance, and code review",
+				},
+				{
+					value: "redteam",
+					label: "Red Team",
+					description: "Authorized penetration testing with reproducible finding evidence",
+				},
+			],
 		},
 	},
 
@@ -4320,14 +4353,14 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.webSearch": {
 		type: "enum",
-		values: SEARCH_PROVIDER_PREFERENCES,
-		default: "auto",
+		values: ["auto", "xai"] as const,
+		default: "xai",
 		ui: {
 			tab: "providers",
 			group: "Services",
 			label: "Web Search Provider",
-			description: "Preferred provider for the web_search tool",
-			options: SEARCH_PROVIDER_OPTIONS,
+			description: "Built-in web_search is locked to xAI Grok OAuth",
+			options: SEARCH_PROVIDER_OPTIONS.filter(option => option.value === "auto" || option.value === "xai"),
 		},
 	},
 	"providers.webSearchExclude": {
@@ -4337,7 +4370,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Excluded Web Search Providers",
-			description: "Providers that web_search should never use, even as fallbacks",
+			description: "Legacy provider-adapter exclusions; built-in web_search never falls back from xAI",
 		},
 	},
 	"providers.webSearchGeminiModel": {

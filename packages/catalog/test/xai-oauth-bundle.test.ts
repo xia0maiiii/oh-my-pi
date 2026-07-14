@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -40,6 +42,21 @@ describe("xai-oauth bundled catalog (regression)", () => {
 			expect(bundledEntry.compat?.supportsReasoningEffort).toBe(seededModel.compat?.supportsReasoningEffort);
 		});
 	}
+
+	it("bundles grok-4.5 with its mandatory three-tier reasoning contract", () => {
+		const grok45 = seed.find(model => model.id === "grok-4.5");
+		expect(grok45, "grok-4.5 must be in the SuperGrok curated seed").toBeDefined();
+		expect(grok45!.contextWindow).toBe(500_000);
+		expect(grok45!.input).toEqual(["text", "image"]);
+		const built = buildModel(grok45!);
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+		});
+		expect(bundled["grok-4.5"]?.thinking).toEqual(built.thinking);
+	});
 
 	// Absolute contract for the user-specified SuperGrok addition. The parity
 	// loop above can't catch a value typo (e.g. 2_000_000) or a flipped

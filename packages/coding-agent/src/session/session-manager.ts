@@ -17,6 +17,7 @@ import {
 	logger,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import type { AgentMode } from "../config/agent-mode";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import {
@@ -56,7 +57,12 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	loadEntriesFromFile,
+	readSessionHeaderFromFile,
+	readTitleSlotFromFile,
+	resolveBlobRefsInEntries,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -767,6 +773,7 @@ export class SessionManager {
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+		const agentMode = this.#header?.agentMode;
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#sessionId = mintSessionId();
@@ -782,6 +789,7 @@ export class SessionManager {
 			id: this.#sessionId,
 			timestamp,
 			cwd: this.#cwd,
+			agentMode,
 			parentSession: options?.parentSession,
 		};
 		this.#titleUpdatedAt = timestamp;
@@ -1049,6 +1057,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.#cwd,
+			agentMode: this.#header.agentMode,
 			parentSession: parentSessionId,
 		};
 		this.#sessionName = this.#header.title;
@@ -1704,6 +1713,18 @@ export class SessionManager {
 		return this.#header;
 	}
 
+	/** Read a target session header through this manager's storage backend. */
+	async readSessionHeader(sessionPath: string): Promise<SessionHeader | undefined> {
+		return await readSessionHeaderFromFile(sessionPath, this.#storage);
+	}
+
+	/** Pin the behavior profile to this session header. */
+	setAgentMode(agentMode: AgentMode): void {
+		if (this.#header.agentMode === agentMode) return;
+		this.#header.agentMode = agentMode;
+		this.#rewriteRequired = true;
+	}
+
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
@@ -1776,6 +1797,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			agentMode: this.#header.agentMode,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 		};
 
@@ -1891,6 +1913,7 @@ export class SessionManager {
 		manager.#resetToNewSession({ parentSession: sourceHeader?.id }, options?.sessionFile);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		manager.#header.agentMode = sourceHeader?.agentMode;
 		manager.#sessionName = manager.#header.title;
 		manager.#titleSource = manager.#header.titleSource;
 		manager.#titleUpdatedAt = nowIso();

@@ -3,6 +3,7 @@ import type { Tool } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
+import guidedGoalRedteamSystemPrompt from "../prompts/goals/guided-goal-redteam-system.md" with { type: "text" };
 import guidedGoalSystemPrompt from "../prompts/goals/guided-goal-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking";
@@ -96,7 +97,9 @@ export async function runGuidedGoalTurn(
 	const response = await instrumentedCompleteSimple(
 		resolved.model,
 		{
-			systemPrompt: [prompt.render(guidedGoalSystemPrompt)],
+			systemPrompt: [
+				prompt.render(session.agentMode === "redteam" ? guidedGoalRedteamSystemPrompt : guidedGoalSystemPrompt),
+			],
 			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 			tools: [RESPOND_TOOL],
 		},

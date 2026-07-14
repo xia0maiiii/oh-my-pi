@@ -103,6 +103,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			result.mode = value;
 		}
 	},
+	"--agent-mode": (result, value, deps) => {
+		if (value === "coding" || value === "redteam") {
+			result.agentMode = value;
+		} else {
+			deps.logger.warn("Invalid value passed to --agent-mode", {
+				value,
+				validValues: ["coding", "redteam"],
+			});
+		}
+	},
 	"--fork": (result, value) => {
 		result.fork = value;
 	},

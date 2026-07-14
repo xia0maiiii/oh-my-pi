@@ -1,5 +1,8 @@
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
+
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
+const REDTEAM_DEFAULT_SPAWN_AGENT = "redteam";
 
 /** Spawn policy derived from a parent agent's `spawns` frontmatter. */
 export interface ResolvedSpawnPolicy {
@@ -15,8 +18,12 @@ export interface ResolvedSpawnPolicy {
 	allowedPromptText?: string;
 }
 
-/** Resolves spawn frontmatter into the default and prompt/error surfaces. */
-export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undefined): ResolvedSpawnPolicy {
+/** Resolves spawn frontmatter into the profile default and prompt/error surfaces. */
+export function resolveSpawnPolicy(
+	parentSpawns: string | boolean | null | undefined,
+	agentMode: AgentMode = DEFAULT_AGENT_MODE,
+): ResolvedSpawnPolicy {
+	const defaultAgent = agentMode === "redteam" ? REDTEAM_DEFAULT_SPAWN_AGENT : DEFAULT_SPAWN_AGENT;
 	let normalized: string;
 	if (parentSpawns === false) {
 		normalized = "";
@@ -29,7 +36,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 	if (normalized === "*") {
 		return {
 			enabled: true,
-			defaultAgent: DEFAULT_SPAWN_AGENT,
+			defaultAgent,
 			allowedAgents: null,
 			allowedErrorText: "*",
 		};
@@ -42,7 +49,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 	if (allowedAgents.length === 0) {
 		return {
 			enabled: false,
-			defaultAgent: DEFAULT_SPAWN_AGENT,
+			defaultAgent,
 			allowedAgents,
 			allowedErrorText: "none (spawns disabled for this agent)",
 		};
@@ -50,7 +57,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 
 	return {
 		enabled: true,
-		defaultAgent: allowedAgents[0] ?? DEFAULT_SPAWN_AGENT,
+		defaultAgent: allowedAgents[0] ?? defaultAgent,
 		allowedAgents,
 		allowedErrorText: allowedAgents.join(","),
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),

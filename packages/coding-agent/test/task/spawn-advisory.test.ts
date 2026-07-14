@@ -22,6 +22,10 @@ describe("buildSpecializationAdvisory", () => {
 		expect(advice).toContain("`role`");
 	});
 
+	it("nudges a role-less redteam default worker", () => {
+		expect(buildSpecializationAdvisory("redteam", [item()], true)).toBeDefined();
+	});
+
 	it("stays silent at max depth even for a generic role-less spawn", () => {
 		expect(buildSpecializationAdvisory("task", [item()], false)).toBeUndefined();
 	});

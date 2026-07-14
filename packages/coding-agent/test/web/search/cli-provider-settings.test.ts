@@ -1,38 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	SEARCH_PROVIDER_ORDER,
-	setExcludedSearchProviders,
-	setPreferredSearchProvider,
-} from "@oh-my-pi/pi-coding-agent/web/search/provider";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
-import { runSearchCommand } from "../../../src/cli/web-search-cli";
-
-const WEB_SEARCH_ENV_KEYS = [
-	"ANTHROPIC_API_KEY",
-	"BRAVE_API_KEY",
-	"EXA_API_KEY",
-	"FIRECRAWL_API_KEY",
-	"JINA_API_KEY",
-	"KAGI_API_KEY",
-	"MOONSHOT_API_KEY",
-	"MOONSHOT_SEARCH_API_KEY",
-	"PARALLEL_API_KEY",
-	"PERPLEXITY_API_KEY",
-	"SEARXNG_ENDPOINT",
-	"SYNTHETIC_API_KEY",
-	"TAVILY_API_KEY",
-	"TINYFISH_API_KEY",
-	"XAI_API_KEY",
-] as const;
+import { parseSearchArgs, runSearchCommand } from "../../../src/cli/web-search-cli";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalOmpProfile = process.env.OMP_PROFILE;
 const originalPiProfile = process.env.PI_PROFILE;
+const originalXaiApiKey = process.env.XAI_API_KEY;
 
 let tempAgentDir: TempDir | undefined;
-let originalEnv: Partial<Record<(typeof WEB_SEARCH_ENV_KEYS)[number], string | undefined>> = {};
 let originalExitCode: typeof process.exitCode;
 
 function responseUrl(input: string | Request | URL): string {
@@ -41,72 +20,72 @@ function responseUrl(input: string | Request | URL): string {
 	return input.url;
 }
 
-function restoreEnv(key: string, value: string | undefined): void {
-	if (value === undefined) delete process.env[key];
-	else process.env[key] = value;
+function makeAuthStorage(accessToken?: string): AuthStorage {
+	return {
+		getOAuthAccess: vi.fn(async (provider: string, sessionId?: string) => {
+			expect(provider).toBe("xai-oauth");
+			expect(sessionId).toBe("cli-web-search");
+			return accessToken ? { accessToken } : undefined;
+		}),
+		rotateSessionCredential: vi.fn(async () => false),
+		hasOAuth: vi.fn((provider: string) => provider === "xai-oauth" && Boolean(accessToken)),
+	} as unknown as AuthStorage;
 }
 
-function makeFetchMock(): typeof fetch {
+function makeXAIFetchMock(requests: Array<{ url: string; init?: RequestInit }>): typeof fetch {
 	return Object.assign(
-		async (input: string | Request | URL, _init?: RequestInit): Promise<Response> => {
+		async (input: string | Request | URL, init?: RequestInit): Promise<Response> => {
 			const url = responseUrl(input);
-			if (url.startsWith("https://s.jina.ai/")) {
-				return new Response(
-					JSON.stringify({ data: [{ title: "Jina result", url: "https://jina.example", content: "jina" }] }),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
+			requests.push({ url, init });
+			if (url !== "https://api.x.ai/v1/responses") {
+				return new Response(`unexpected URL: ${url}`, { status: 500 });
 			}
-			if (url === "https://api.tavily.com/search") {
-				return new Response(
-					JSON.stringify({
-						answer: "Tavily answer",
-						results: [{ title: "Tavily result", url: "https://tavily.example", content: "tavily" }],
-						request_id: "req-test",
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
-			}
-			return new Response(`unexpected URL: ${url}`, { status: 500 });
+			return new Response(
+				JSON.stringify({
+					id: "resp-cli-test",
+					model: "grok-4.5",
+					output_text: "Grok search answer",
+					citations: ["https://example.com/grok-source"],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
 		},
 		{ preconnect: fetch.preconnect },
 	);
 }
 
+function captureStdout(): { read: () => string } {
+	let output = "";
+	vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+		output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		return true;
+	});
+	return { read: () => stripVTControlCharacters(output) };
+}
+
 beforeEach(async () => {
-	originalEnv = Object.fromEntries(WEB_SEARCH_ENV_KEYS.map(key => [key, process.env[key]]));
-	for (const key of WEB_SEARCH_ENV_KEYS) delete process.env[key];
-	process.env.JINA_API_KEY = "test-jina-key";
-	process.env.TAVILY_API_KEY = "test-tavily-key";
+	delete process.env.XAI_API_KEY;
 	originalExitCode = process.exitCode;
-	process.exitCode = undefined;
+	process.exitCode = 0;
 
 	resetSettingsForTest();
-	setPreferredSearchProvider("auto");
-	setExcludedSearchProviders([]);
 	tempAgentDir = TempDir.createSync("@omp-search-cli-");
 	setAgentDir(tempAgentDir.path());
-	await Settings.init({
-		inMemory: true,
-		cwd: tempAgentDir.path(),
-		overrides: {
-			"providers.webSearch": "tavily",
-			"providers.webSearchExclude": ["jina"],
-		},
-	});
+	await Settings.init({ inMemory: true, cwd: tempAgentDir.path() });
 });
 
 afterEach(async () => {
 	vi.restoreAllMocks();
 	resetSettingsForTest();
-	setPreferredSearchProvider("auto");
-	setExcludedSearchProviders([]);
-	process.exitCode = originalExitCode;
-	for (const key of WEB_SEARCH_ENV_KEYS) {
-		restoreEnv(key, originalEnv[key]);
-	}
-	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
-	restoreEnv("OMP_PROFILE", originalOmpProfile);
-	restoreEnv("PI_PROFILE", originalPiProfile);
+	process.exitCode = originalExitCode ?? 0;
+	if (originalXaiApiKey === undefined) delete process.env.XAI_API_KEY;
+	else process.env.XAI_API_KEY = originalXaiApiKey;
+	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+	if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
+	else process.env.OMP_PROFILE = originalOmpProfile;
+	if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
+	else process.env.PI_PROFILE = originalPiProfile;
 	__resetDirsFromEnvForTests();
 	if (tempAgentDir) {
 		await tempAgentDir.remove();
@@ -114,54 +93,66 @@ afterEach(async () => {
 	}
 });
 
-describe("runSearchCommand provider settings", () => {
-	it("applies configured web-search preference and exclusions before resolving the implicit chain", async () => {
-		vi.spyOn(globalThis, "fetch").mockImplementation(makeFetchMock());
+describe("runSearchCommand Grok-only routing", () => {
+	it.each([
+		["implicit default", undefined],
+		["auto alias", "auto"],
+		["explicit xAI", "xai"],
+	] as const)("routes the %s through xAI OAuth", async (_caseName, selectedProvider) => {
+		vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(makeAuthStorage("test-grok-oauth-token"));
+		const requests: Array<{ url: string; init?: RequestInit }> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(makeXAIFetchMock(requests));
+		const stdout = captureStdout();
 
-		let stdout = "";
-		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-			stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-			return true;
+		await runSearchCommand({
+			query: "provider selection smoke test",
+			provider: selectedProvider,
+			limit: 1,
+			expanded: false,
 		});
 
-		await runSearchCommand({ query: "provider selection smoke test", limit: 1, expanded: false });
-
-		const plain = stripVTControlCharacters(stdout);
-		expect(plain).toContain("Provider: Tavily (API)");
-		expect(plain).not.toContain("Provider: Jina");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.url).toBe("https://api.x.ai/v1/responses");
+		expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe("Bearer test-grok-oauth-token");
+		expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
+			model: "grok-4.5",
+			tools: [{ type: "web_search" }],
+		});
+		expect(stdout.read()).toContain("Provider: grok-4.5 @ xAI (OAuth)");
+		expect(process.exitCode).toBe(0);
 	});
 
-	it("treats explicit --provider auto as a one-shot override of the configured preferred provider", async () => {
-		// Tavily is the configured preference, but `--provider auto` overrides it and walks the
-		// chain. Restrict eligibility to Jina + Tavily so an ambient broker/OAuth provider
-		// (gemini, anthropic, codex, perplexity…) can't win on a dev machine; the chain order
-		// (Jina before Tavily) still decides between the two.
-		const currentTempDir = tempAgentDir;
-		if (!currentTempDir) throw new Error("tempAgentDir missing");
-		// Drive the exclusion through settings too — Settings.init re-applies
-		// `providers.webSearchExclude`, overwriting a bare setExcludedSearchProviders() call.
-		const onlyJinaTavily = SEARCH_PROVIDER_ORDER.filter(id => id !== "jina" && id !== "tavily");
-		resetSettingsForTest();
-		setPreferredSearchProvider("auto");
-		setExcludedSearchProviders(onlyJinaTavily);
-		await Settings.init({
-			inMemory: true,
-			cwd: currentTempDir.path(),
-			overrides: { "providers.webSearch": "tavily", "providers.webSearchExclude": onlyJinaTavily },
-		});
+	it("fails clearly without Grok OAuth and does not accept a plain xAI API key", async () => {
+		process.env.XAI_API_KEY = "plain-xai-api-key";
+		vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(makeAuthStorage());
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch must not run"));
+		const stdout = captureStdout();
 
-		vi.spyOn(globalThis, "fetch").mockImplementation(makeFetchMock());
+		await runSearchCommand({ query: "missing OAuth", expanded: false });
 
-		let stdout = "";
-		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-			stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		expect(stdout.read()).toContain("No xAI Grok OAuth subscription credential");
+		expect(stdout.read()).toContain("/login");
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("rejects an explicit non-xAI provider before running search", async () => {
+		const parsed = parseSearchArgs(["q", "--provider", "brave", "blocked provider"]);
+		expect(parsed).toBeDefined();
+		let stderr = "";
+		vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+			stderr += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
 			return true;
 		});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new Error("process.exit");
+		}) as typeof process.exit);
 
-		await runSearchCommand({ query: "explicit auto chain", provider: "auto", limit: 1, expanded: false });
+		await expect(runSearchCommand(parsed!)).rejects.toThrow("process.exit");
 
-		const plain = stripVTControlCharacters(stdout);
-		expect(plain).toContain("Provider: Jina");
-		expect(plain).not.toContain("Provider: Tavily (API)");
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		const plain = stripVTControlCharacters(stderr);
+		expect(plain).toContain('Unknown provider "brave"');
+		expect(plain).toContain("Valid providers: auto, xai");
 	});
 });

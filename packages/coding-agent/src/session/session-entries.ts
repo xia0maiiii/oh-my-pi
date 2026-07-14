@@ -1,7 +1,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { AgentMode } from "../config/agent-mode";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 
 export const SESSION_TITLE_SLOT_BYTES = 256;
 
@@ -31,6 +32,7 @@ export interface SessionHeader {
 	titleSource?: SessionTitleSource;
 	timestamp: string;
 	cwd: string;
+	agentMode?: AgentMode;
 	parentSession?: string;
 }
 

@@ -1,8 +1,9 @@
 /**
  * Unified Web Search Tool
  *
- * Single tool supporting Anthropic, Perplexity, Exa, Brave, Jina, Kimi, Gemini, Codex, Tavily, Kagi, Z.AI, SearXNG, and Synthetic
- * providers with provider-specific parameters exposed conditionally.
+ * The built-in tool is pinned to xAI Grok OAuth search. Provider adapters stay
+ * available for compatibility and direct testing, but this entry point never
+ * falls back to another provider.
  */
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
@@ -21,7 +22,6 @@ import {
 	formatSearchProviderFailure,
 	formatSearchProviderFailures,
 	getSearchProvider,
-	resolveProviderChain,
 	type SearchProvider,
 } from "./provider";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
@@ -127,31 +127,19 @@ async function executeSearch(
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
 	const { authStorage, sessionId, signal } = options;
+	const credentialSessionId = sessionId ?? _toolCallId;
 	const explicitProvider = params.provider;
-	let providers: SearchProvider[];
-	if (explicitProvider && explicitProvider !== "auto") {
-		const provider = await getSearchProvider(explicitProvider);
-		providers = (await provider.isExplicitlyAvailable(authStorage))
-			? [provider]
-			: await resolveProviderChain(authStorage, "auto");
-	} else if (explicitProvider === "auto") {
-		// Explicit `--provider auto` bypasses the configured preferred provider
-		// for this invocation; exclusions still apply.
-		providers = await resolveProviderChain(authStorage, "auto");
-	} else {
-		providers = await resolveProviderChain(authStorage);
-	}
-	if (providers.length === 0) {
-		const message = "No web search provider configured.";
+	if (explicitProvider && explicitProvider !== "auto" && explicitProvider !== "xai") {
+		const message = `Web search is locked to xAI Grok OAuth; provider "${explicitProvider}" is not allowed.`;
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
 			details: { response: { provider: "none", sources: [] }, error: message },
 		};
 	}
+	const providers: SearchProvider[] = [await getSearchProvider("xai")];
 
-	// Invariant across providers; read once and tolerate an uninitialized
-	// Settings singleton (e.g. `omp q ...` CLI path, unit tests) so the
-	// provider-fallback loop never aborts before any provider runs.
+	// Preserve shared adapter settings on SearchParams for compatibility; xAI
+	// ignores them. Tolerate an uninitialized Settings singleton in CLI/tests.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
 		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
@@ -181,7 +169,7 @@ async function executeSearch(
 				temperature: params.temperature,
 				signal,
 				authStorage,
-				sessionId,
+				sessionId: credentialSessionId,
 				antigravityEndpointMode,
 				geminiModel,
 			});
@@ -242,7 +230,7 @@ export async function runSearchQuery(
 /**
  * Web search tool implementation.
  *
- * Supports the configured web-search provider chain with automatic fallback.
+ * Always executes through xAI Grok OAuth without provider fallback.
  */
 export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRenderDetails> {
 	readonly name = "web_search";

@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import type { AgentMode } from "../config/agent-mode";
 import { jsBackend, juliaBackend, pythonBackend, rubyBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -164,6 +165,7 @@ export interface EvalToolDescriptionOptions {
 	js?: boolean;
 	rb?: boolean;
 	jl?: boolean;
+	agentMode?: AgentMode;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
@@ -176,7 +178,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 	const js = options.js ?? true;
 	const rb = options.rb ?? false;
 	const jl = options.jl ?? false;
-	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true);
+	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true, options.agentMode);
 	return prompt.render(evalDescription, {
 		py,
 		js,
@@ -306,6 +308,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			rb: backends.ruby,
 			jl: backends.julia,
 			spawns: sessionSpawns,
+			agentMode: this.session.agentMode ?? this.session.settings.get("agentMode"),
 		});
 	}
 	/** All reuse-chain examples; the `examples` getter filters by enabled languages. */

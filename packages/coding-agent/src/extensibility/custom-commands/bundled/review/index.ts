@@ -14,6 +14,13 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
+import redteamReviewCustomRequestTemplate from "../../../../prompts/redteam-review-custom-request.md" with {
+	type: "text",
+};
+import redteamReviewHeadlessRequestTemplate from "../../../../prompts/redteam-review-headless-request.md" with {
+	type: "text",
+};
+import redteamReviewRequestTemplate from "../../../../prompts/redteam-review-request.md" with { type: "text" };
 import reviewCustomRequestTemplate from "../../../../prompts/review-custom-request.md" with { type: "text" };
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
@@ -24,6 +31,24 @@ import * as jj from "../../../../utils/jj";
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
+
+interface ReviewPromptTemplates {
+	request: string;
+	custom: string;
+	headless: string;
+}
+
+const CODING_REVIEW_PROMPTS: ReviewPromptTemplates = {
+	request: reviewRequestTemplate,
+	custom: reviewCustomRequestTemplate,
+	headless: reviewHeadlessRequestTemplate,
+};
+
+const REDTEAM_REVIEW_PROMPTS: ReviewPromptTemplates = {
+	request: redteamReviewRequestTemplate,
+	custom: redteamReviewCustomRequestTemplate,
+	headless: redteamReviewHeadlessRequestTemplate,
+};
 
 interface FileDiff {
 	path: string;
@@ -236,7 +261,12 @@ function buildReviewPrompt(
 	mode: string,
 	stats: DiffStats,
 	rawDiff: string,
-	options: { additionalInstructions?: string; diffInstruction?: string; contextInstruction?: string } = {},
+	options: {
+		additionalInstructions?: string;
+		diffInstruction?: string;
+		contextInstruction?: string;
+		requestTemplate?: string;
+	} = {},
 ): string {
 	const agentCount = getRecommendedAgentCount(stats);
 	const skipDiff = rawDiff.length > MAX_DIFF_CHARS || stats.files.length > MAX_FILES_FOR_INLINE_DIFF;
@@ -249,7 +279,7 @@ function buildReviewPrompt(
 		hunksPreview: skipDiff ? getDiffPreview(f.hunks, linesPerFile) : "",
 	}));
 
-	return prompt.render(reviewRequestTemplate, {
+	return prompt.render(options.requestTemplate ?? reviewRequestTemplate, {
 		mode,
 		files: filesWithExt,
 		excluded: stats.excluded,
@@ -267,12 +297,12 @@ function buildReviewPrompt(
 	});
 }
 
-function buildCustomReviewPrompt(instructions: string): string {
-	return prompt.render(reviewCustomRequestTemplate, { instructions });
+function buildCustomReviewPrompt(instructions: string, template: string): string {
+	return prompt.render(template, { instructions });
 }
 
-function buildHeadlessReviewPrompt(focus?: string): string {
-	return prompt.render(reviewHeadlessRequestTemplate, { focus });
+function buildHeadlessReviewPrompt(focus: string | undefined, template: string): string {
+	return prompt.render(template, { focus });
 }
 
 const REVIEW_CONTEXT_PR_LIMIT = 3;
@@ -372,7 +402,12 @@ function buildReviewPromptFromDiff(
 	diffText: string,
 	extraInstructions: string | undefined,
 	emptyMessage: string,
-	options: { diffInstruction?: string; filteredMessage?: string; contextInstruction?: string } = {},
+	options: {
+		diffInstruction?: string;
+		filteredMessage?: string;
+		contextInstruction?: string;
+		requestTemplate?: string;
+	} = {},
 ): string | undefined {
 	if (!diffText.trim()) {
 		if (ctx.hasUI) ctx.ui.notify(emptyMessage, "warning");
@@ -390,6 +425,7 @@ function buildReviewPromptFromDiff(
 		additionalInstructions: extraInstructions,
 		diffInstruction: options.diffInstruction,
 		contextInstruction: options.contextInstruction,
+		requestTemplate: options.requestTemplate,
 	});
 }
 
@@ -398,6 +434,7 @@ async function buildPrReviewPrompt(
 	ctx: HookCommandContext,
 	ref: ReviewPrRef,
 	extraInstructions: string,
+	templates: ReviewPromptTemplates,
 ): Promise<string | undefined> {
 	let diffText: string;
 	try {
@@ -419,7 +456,11 @@ async function buildPrReviewPrompt(
 		diffText,
 		extraInstructions || undefined,
 		`PR ${ref.repo}#${ref.number} has no diff content available`,
-		{ diffInstruction: buildPrLargeDiffInstruction(ref), contextInstruction: buildPrContextInstruction(ref) },
+		{
+			diffInstruction: buildPrLargeDiffInstruction(ref),
+			contextInstruction: buildPrContextInstruction(ref),
+			requestTemplate: templates.request,
+		},
 	);
 	if (promptText !== undefined || ctx.hasUI) return promptText;
 	return `Unable to review PR ${ref.repo}#${ref.number}: no diff content available.`;
@@ -479,14 +520,16 @@ export class ReviewCommand implements CustomCommand {
 	constructor(private api: CustomCommandAPI) {}
 
 	async execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> {
+		const templates =
+			ctx.sessionManager?.getHeader?.()?.agentMode === "redteam" ? REDTEAM_REVIEW_PROMPTS : CODING_REVIEW_PROMPTS;
 		const parsedArgs = extractReviewPrRefFromArgs(args);
 		if (parsedArgs.prRef) {
-			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
+			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions, templates);
 		}
 
 		const extraInstructions = parsedArgs.extraInstructions || undefined;
 		if (!ctx.hasUI) {
-			return buildHeadlessReviewPrompt(extraInstructions);
+			return buildHeadlessReviewPrompt(extraInstructions, templates.headless);
 		}
 
 		const choices: Array<{ label: string; value: ReviewMenuChoice }> = [
@@ -526,7 +569,7 @@ export class ReviewCommand implements CustomCommand {
 
 		switch (selectedChoice.kind) {
 			case "detected-pr":
-				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "");
+				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "", templates);
 
 			case "base-branch": {
 				const branches = await getGitBranches(this.api);
@@ -553,6 +596,7 @@ export class ReviewCommand implements CustomCommand {
 					diffText,
 					extraInstructions,
 					`No changes between ${baseBranch} and ${currentBranch}`,
+					{ requestTemplate: templates.request },
 				);
 			}
 
@@ -569,7 +613,7 @@ export class ReviewCommand implements CustomCommand {
 					reviewDiff.diffText,
 					extraInstructions,
 					reviewDiff.emptyMessage ?? "No diff content found",
-					{ diffInstruction: reviewDiff.diffInstruction },
+					{ diffInstruction: reviewDiff.diffInstruction, requestTemplate: templates.request },
 				);
 			}
 
@@ -599,7 +643,10 @@ export class ReviewCommand implements CustomCommand {
 					diffText,
 					extraInstructions,
 					"Commit has no diff content",
-					{ filteredMessage: "No reviewable files in commit (all changes filtered out)" },
+					{
+						filteredMessage: "No reviewable files in commit (all changes filtered out)",
+						requestTemplate: templates.request,
+					},
 				);
 			}
 
@@ -623,11 +670,12 @@ export class ReviewCommand implements CustomCommand {
 						{
 							additionalInstructions: instructions,
 							diffInstruction: reviewDiff.diffInstruction,
+							requestTemplate: templates.request,
 						},
 					);
 				}
 
-				return buildCustomReviewPrompt(instructions);
+				return buildCustomReviewPrompt(instructions, templates.custom);
 			}
 		}
 	}

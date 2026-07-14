@@ -1,10 +1,15 @@
 import { escapeXmlText, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
+import goalModeRedteamActivePrompt from "../prompts/goals/goal-mode-redteam-active.md" with { type: "text" };
+import goalRedteamBudgetLimitPrompt from "../prompts/goals/goal-redteam-budget-limit.md" with { type: "text" };
+import goalRedteamContinuationPrompt from "../prompts/goals/goal-redteam-continuation.md" with { type: "text" };
 import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
 
 export interface GoalRuntimeHost {
+	agentMode?: AgentMode;
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
@@ -36,6 +41,18 @@ export interface GoalRuntimeSnapshot {
 }
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
+
+const CODING_GOAL_PROMPTS: Record<GoalPromptKind, string> = {
+	active: goalModeActivePrompt,
+	continuation: goalContinuationPrompt,
+	"budget-limit": goalBudgetLimitPrompt,
+};
+
+const REDTEAM_GOAL_PROMPTS: Record<GoalPromptKind, string> = {
+	active: goalModeRedteamActivePrompt,
+	continuation: goalRedteamContinuationPrompt,
+	"budget-limit": goalRedteamBudgetLimitPrompt,
+};
 
 function cloneGoal(goal: Goal): Goal {
 	return { ...goal };
@@ -76,13 +93,8 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
-	const template =
-		kind === "active"
-			? goalModeActivePrompt
-			: kind === "continuation"
-				? goalContinuationPrompt
-				: goalBudgetLimitPrompt;
+function renderGoalPromptForMode(kind: GoalPromptKind, goal: Goal, agentMode: AgentMode = DEFAULT_AGENT_MODE): string {
+	const template = agentMode === "redteam" ? REDTEAM_GOAL_PROMPTS[kind] : CODING_GOAL_PROMPTS[kind];
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
 		tokensUsed: String(goal.tokensUsed),
@@ -90,6 +102,10 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
 	});
+}
+
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+	return renderGoalPromptForMode(kind, goal);
 }
 
 export function completionBudgetReport(goal: Goal): string | null {
@@ -498,14 +514,14 @@ export class GoalRuntime {
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
+			? renderGoalPromptForMode("active", state.goal, this.#host.agentMode)
 			: undefined;
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPromptForMode("continuation", state.goal, this.#host.agentMode)
 			: undefined;
 	}
 
@@ -514,7 +530,7 @@ export class GoalRuntime {
 		this.#budgetReportedFor = goal.id;
 		await this.#host.sendHiddenMessage({
 			customType: "goal-budget-limit",
-			content: renderGoalPrompt("budget-limit", goal),
+			content: renderGoalPromptForMode("budget-limit", goal, this.#host.agentMode),
 			deliverAs: "steer",
 		});
 	}

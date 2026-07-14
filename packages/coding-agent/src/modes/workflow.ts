@@ -1,5 +1,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import workflowNoticeTemplate from "../prompts/system/workflow-notice.md" with { type: "text" };
+import workflowRedteamNoticeTemplate from "../prompts/system/workflow-redteam-notice.md" with { type: "text" };
 import { createGradientHighlighter, type KeywordHighlighter } from "./gradient-highlight";
 import { keywordInProse } from "./markdown-prose";
 
@@ -22,8 +24,15 @@ const WORKFLOW_WORD = /(?<!\S)workflowz(?!\S)/;
 export const WORKFLOW_NOTICE: string = renderWorkflowNotice({ taskBatch: true });
 
 /** renderWorkflowNotice renders the workflow notice for the active task schema. */
-export function renderWorkflowNotice({ taskBatch }: { taskBatch: boolean }): string {
-	return prompt.render(workflowNoticeTemplate, { taskBatch }).trim();
+export function renderWorkflowNotice({
+	taskBatch,
+	agentMode = DEFAULT_AGENT_MODE,
+}: {
+	taskBatch: boolean;
+	agentMode?: AgentMode;
+}): string {
+	const template = agentMode === "redteam" ? workflowRedteamNoticeTemplate : workflowNoticeTemplate;
+	return prompt.render(template, { taskBatch }).trim();
 }
 
 /**

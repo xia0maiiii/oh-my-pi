@@ -24,6 +24,7 @@ import {
 	findThinkingVariantToken,
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
+	isGrok45ModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
@@ -226,6 +227,9 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		mode: inferThinkingControlMode(spec, parsed),
 		efforts,
 	};
+	if (isGrok45ModelId(spec.id)) {
+		config.defaultLevel = Effort.High;
+	}
 	const effortMap = inferEffortMap(spec, compat, parsed, config.mode, config.efforts);
 	if (effortMap !== undefined) {
 		config.effortMap = effortMap;
@@ -299,6 +303,9 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (isGrok45ModelId(spec.id)) {
+		return LOW_MEDIUM_HIGH_REASONING_EFFORTS;
+	}
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// Z.ai/Zhipu and OpenRouter both surface GLM-5.2's full effort ladder,
 		// including the top `xhigh` (= "max") tier; Umans and Ollama Cloud
@@ -502,6 +509,7 @@ const OPENAI_O_SERIES_RE = /^o[134](?:$|[-:.])/i;
  *   the orphans.
  */
 function impliesMandatoryReasoning(parsed: ParsedModel, modelId: string): boolean {
+	if (isGrok45ModelId(modelId)) return true;
 	if (parsed.family === "gemini") {
 		if (semverGte(parsed.version, "3.0")) return true;
 		if (parsed.kind === "pro" && semverGte(parsed.version, "2.5")) return true;

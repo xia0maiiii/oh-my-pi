@@ -5,6 +5,7 @@
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
+import { AGENT_MODES } from "../config/agent-mode";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { CLI_THINKING_LEVELS } from "../thinking";
@@ -61,6 +62,10 @@ export default class Index extends Command {
 		mode: Flags.string({
 			description: "Output mode: text (default), json, rpc, or rpc-ui",
 			options: ["text", "json", "rpc", "acp", "rpc-ui"],
+		}),
+		"agent-mode": Flags.string({
+			description: "Session behavior profile",
+			options: [...AGENT_MODES],
 		}),
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",

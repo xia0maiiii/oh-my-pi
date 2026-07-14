@@ -280,18 +280,33 @@ The default is an empty array (nothing disabled). For the two subsystems' provid
 
 Every key below is defined in the settings schema; `omp config list` shows the full set with current values. Defaults and enum values are taken from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.
 
+### Agent behavior profile
+
+`agentMode` selects the built-in behavior profile for new sessions. `coding` keeps the generic coding-agent prompts and roster. `redteam` preserves the same tools and coding capabilities, then adds penetration-testing instructions, evidence requirements, specialist agents, and profile-specific plan/goal/review/orchestration guidance.
+
+```yaml
+agentMode: redteam
+```
+
+`redteam` is the default for new sessions. Use `omp --agent-mode coding` for a one-shot coding session, or `omp config set agentMode coding` to change the configured default. The selected value is persisted in each session header. Resume and branch operations keep that persisted profile even if the global setting or startup flag later differs; changing it in `/settings` affects future top-level sessions. Sessions created before profile metadata existed migrate to `coding`, preserving their historical behavior even when the current global default is `redteam`.
+
+| Key | Type | Default | Values |
+|---|---|---|---|
+| `agentMode` | enum | `redteam` | `coding`, `redteam`. Override for a new session with `--agent-mode`. |
+
 ### Models
 
 `modelRoles`, `modelTags`, and `cycleOrder` work together to define the models you can switch between. Role values may carry a thinking suffix (`:minimal`, `:low`, `:medium`, `:high`, `:xhigh`).
 
 ```yaml
 modelRoles:
-  default: anthropic/claude-sonnet-4-5
-  smol: openai/gpt-4.1-mini
-  slow: anthropic/claude-opus-4-5:high
-  vision: gemini/gemini-3-pro-preview
-  plan: anthropic/claude-opus-4-5
-  advisor: anthropic/claude-sonnet-4-5:medium
+  default: openai-codex/gpt-5.6-sol:high
+  smol: xai-oauth/grok-4.5:high
+  slow: xai-oauth/grok-4.5:high
+  plan: openai-codex/gpt-5.6-sol:xhigh
+  designer: openai-codex/gpt-5.6-sol:xhigh
+  tiny: xai-oauth/grok-4.5:off
+  advisor: openai-codex/gpt-5.6-sol:xhigh
 
 cycleOrder:
   - smol
@@ -308,7 +323,7 @@ enabledModels:
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `modelRoles` | record | `{}` | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `pi/smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
+| `modelRoles` | record | See example above | Map of role name -> model id. Fresh installs use the seven displayed assignments; explicit user or project configuration replaces the default record. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. Grok 4.5 cannot disable reasoning upstream, so the bundled `tiny:off` selector is clamped to its lowest supported effort. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
 | `modelTags` | record | `{}` | Custom role/tag metadata; can introduce additional roles. |
 | `modelProviderOrder` | array | `[]` | Preferred provider order when a model id is ambiguous. |
 | `cycleOrder` | array | `["smol","default","slow"]` | Roles cycled by the model switcher. |
@@ -594,10 +609,9 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 
 ```yaml
 providers:
-  webSearch: auto
+  webSearch: xai
   image: auto
   fetch: auto
-  webSearchGeminiModel: gemini-2.5-flash
   tinyModel: online
   tinyModelDevice: default
   tinyModelDtype: default
@@ -621,8 +635,9 @@ searxng:
 
 | Key | Type | Default | Values / notes |
 |---|---|---|---|
-| `providers.webSearch` | enum | `auto` | `auto` plus the configured search providers (`perplexity`, `gemini`, `anthropic`, `codex`, `zai`, `exa`, `jina`, `kagi`, `tavily`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`). |
-| `providers.webSearchGeminiModel` | string | _(unset)_ | Gemini model ID for Google Search grounding when `web_search` uses Gemini; defaults to `gemini-2.5-flash`, overridden by `GEMINI_SEARCH_MODEL`. |
+| `providers.webSearch` | enum | `xai` | `xai`, `auto`. The built-in `web_search` is hard-locked to xAI Grok OAuth; `auto` is a compatibility alias for the same route. |
+| `providers.webSearchExclude` | string array | `[]` | Compatibility setting for the provider registry; it does not exclude xAI from the hard-locked built-in `web_search` route. |
+| `providers.webSearchGeminiModel` | string | _(unset)_ | Compatibility setting for direct Gemini adapter workflows; it does not affect the built-in `web_search` route. |
 | `providers.image` | enum | `auto` | `auto`, `openai`, `antigravity`, `xai`, `gemini`, `openrouter`. |
 | `providers.fetch` | enum | `auto` | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `jina`. |
 | `providers.tinyModel` | enum | `online` | `online` or a local model (`lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`). |

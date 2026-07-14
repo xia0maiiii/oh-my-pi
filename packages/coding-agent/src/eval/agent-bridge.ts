@@ -149,7 +149,10 @@ function assertDepthAllowed(session: ToolSession): void {
 }
 
 function assertSpawnAllowed(session: ToolSession, agentName: string): void {
-	const spawnPolicy = resolveSpawnPolicy(session.getSessionSpawns());
+	const spawnPolicy = resolveSpawnPolicy(
+		session.getSessionSpawns(),
+		session.agentMode ?? session.settings.get("agentMode"),
+	);
 	if (!spawnPolicy.enabled) {
 		throw new ToolError(`Cannot spawn '${agentName}'. Allowed: ${spawnPolicy.allowedErrorText}`);
 	}
@@ -310,7 +313,12 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
  */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	const parsed = parseAgentArgs(args);
-	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
+	const agentName =
+		parsed.agent ??
+		resolveSpawnPolicy(
+			options.session.getSessionSpawns(),
+			options.session.agentMode ?? options.session.settings.get("agentMode"),
+		).defaultAgent;
 	const structured = Object.hasOwn(parsed, "schema");
 
 	assertNotPlanMode(options.session);
@@ -324,7 +332,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		);
 	}
 
-	const { agents } = await taskDiscovery.discoverAgents(options.session.cwd);
+	const agentMode = options.session.agentMode ?? options.session.settings.get("agentMode");
+	const { agents } = await taskDiscovery.discoverAgents(options.session.cwd, undefined, agentMode);
 	const agent = taskDiscovery.getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -387,6 +396,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 
 	const baseRunOptions: ExecutorOptions = {
 		cwd: options.session.cwd,
+		agentMode,
 		agent: effectiveAgent,
 		task: renderSubagentPrompt(assignment),
 		assignment,

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
-import type { AuthStorage, CredentialOriginKind, FetchImpl } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { searchXAI, XAIProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/xai";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
@@ -10,74 +10,35 @@ type CapturedRequest = {
 	body: Record<string, unknown> | null;
 };
 
-type FakeAuthProvider = "xai" | "xai-oauth";
-type FakeAuthCredential = string | { key: string; kind: CredentialOriginKind };
-type FakeAuthCredentials = Partial<Record<FakeAuthProvider, FakeAuthCredential>>;
-type NormalizedFakeAuthCredential = { key: string; kind: CredentialOriginKind };
+interface FakeAuthCredentials {
+	oauthToken?: string;
+	xaiApiKey?: string;
+	xaiOAuthApiKey?: string;
+}
 
-function makeAuthStorage(credentials: string | FakeAuthCredentials | undefined) {
-	const credentialsByProvider: Partial<Record<FakeAuthProvider, NormalizedFakeAuthCredential>> = {};
-	if (typeof credentials === "string") {
-		credentialsByProvider.xai = { key: credentials, kind: "api_key" };
-	} else if (credentials !== undefined) {
-		const xaiCredential = credentials.xai;
-		if (typeof xaiCredential === "string") {
-			credentialsByProvider.xai = { key: xaiCredential, kind: "api_key" };
-		} else if (xaiCredential) {
-			credentialsByProvider.xai = xaiCredential;
-		}
-		const xaiOAuthCredential = credentials["xai-oauth"];
-		if (typeof xaiOAuthCredential === "string") {
-			credentialsByProvider["xai-oauth"] = { key: xaiOAuthCredential, kind: "oauth" };
-		} else if (xaiOAuthCredential) {
-			credentialsByProvider["xai-oauth"] = xaiOAuthCredential;
-		}
-	}
-
+function makeAuthStorage(credentials: FakeAuthCredentials = { oauthToken: "test-xai-oauth-token" }) {
 	return {
-		resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }) {
+		async getOAuthAccess(provider: string, sessionId?: string) {
+			expect(provider).toBe("xai-oauth");
+			expect(sessionId).toBe("session-xai-test");
+			return credentials.oauthToken ? { accessToken: credentials.oauthToken } : undefined;
+		},
+		async rotateSessionCredential(provider: string, sessionId?: string) {
+			expect(provider).toBe("xai-oauth");
+			expect(sessionId).toBe("session-xai-test");
+			return false;
+		},
+		hasOAuth(provider: string) {
+			return provider === "xai-oauth" && Boolean(credentials.oauthToken);
+		},
+		resolver(_provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }) {
 			expect(options?.sessionId).toBe("session-xai-test");
-			const credentialProvider = provider === "xai-oauth" || provider === "xai" ? provider : undefined;
-			return async () => {
-				if (credentialProvider === undefined) {
-					return undefined;
-				}
-				return credentialsByProvider[credentialProvider]?.key;
-			};
-		},
-		hasAuth(provider: string) {
-			if (provider === "xai") {
-				return Boolean(credentialsByProvider.xai) || Boolean(Bun.env.XAI_API_KEY);
-			}
-			if (provider === "xai-oauth") {
-				return (
-					Boolean(credentialsByProvider["xai-oauth"]) ||
-					Boolean(Bun.env.XAI_OAUTH_TOKEN) ||
-					Boolean(Bun.env.XAI_API_KEY)
-				);
-			}
-			return false;
-		},
-		hasNonEnvCredential(provider: string) {
-			if (provider === "xai-oauth" || provider === "xai") {
-				const credential = credentialsByProvider[provider];
-				return Boolean(credential && credential.kind !== "env");
-			}
-			return false;
-		},
-		getCredentialOrigin(provider: string) {
-			if (provider === "xai-oauth" || provider === "xai") {
-				const credential = credentialsByProvider[provider];
-				if (credential) return { kind: credential.kind };
-				if (provider === "xai-oauth" && (Bun.env.XAI_OAUTH_TOKEN || Bun.env.XAI_API_KEY)) return { kind: "env" };
-				if (provider === "xai" && Bun.env.XAI_API_KEY) return { kind: "env" };
-			}
-			return undefined;
+			return async () => credentials.xaiOAuthApiKey ?? credentials.xaiApiKey;
 		},
 	} as unknown as AuthStorage;
 }
 
-function makeParams(fetch: FetchImpl, authStorage: AuthStorage = makeAuthStorage("test-xai-key")) {
+function makeParams(fetch: FetchImpl, authStorage: AuthStorage = makeAuthStorage()) {
 	return {
 		query: "latest xAI web search",
 		systemPrompt: "Use web search for current xAI facts.",
@@ -123,8 +84,8 @@ describe("xAI web search provider", () => {
 		setSystemTime();
 	});
 
-	it("POSTs the Responses API with bearer auth and xAI web_search tool payload", async () => {
-		const capture = captureFetch({ id: "resp_request", model: "grok-4.3", output_text: "xAI answer" });
+	it("POSTs the Responses API with Grok subscription OAuth and the xAI web_search tool payload", async () => {
+		const capture = captureFetch({ id: "resp_request", model: "grok-4.5", output_text: "xAI answer" });
 
 		await searchXAI({
 			...makeParams(capture.fetchMock),
@@ -137,10 +98,10 @@ describe("xAI web search provider", () => {
 		expect(capture.capturedRequest?.method).toBe("POST");
 		expect(capture.capturedRequest?.headers).toMatchObject({
 			"Content-Type": "application/json",
-			Authorization: "Bearer test-xai-key",
+			Authorization: "Bearer test-xai-oauth-token",
 		});
 		expect(capture.capturedRequest?.body).toMatchObject({
-			model: "grok-4.3",
+			model: "grok-4.5",
 			input: [
 				{ role: "system", content: "Use web search for current xAI facts." },
 				{ role: "user", content: "latest xAI web search" },
@@ -153,28 +114,10 @@ describe("xAI web search provider", () => {
 		expect(capture.capturedRequest?.body).not.toHaveProperty("search_parameters");
 	});
 
-	it("uses dedicated xAI OAuth credentials for Responses API bearer auth", async () => {
-		const capture = captureFetch({ id: "resp_xai_oauth", model: "grok-4.3", output_text: "xAI OAuth answer" });
-
-		await searchXAI(
-			makeParams(
-				capture.fetchMock,
-				makeAuthStorage({
-					"xai-oauth": "test-xai-oauth-token",
-				}),
-			),
-		);
-
-		expect(capture.capturedRequest).not.toBeNull();
-		expect(capture.capturedRequest?.headers).toMatchObject({
-			Authorization: "Bearer test-xai-oauth-token",
-		});
-	});
-
-	it("prefers dedicated xAI OAuth credentials over xAI API keys", async () => {
+	it("uses Grok subscription OAuth even when a plain xAI API key is present", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_oauth_priority",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "xAI OAuth answer",
 		});
 
@@ -182,8 +125,8 @@ describe("xAI web search provider", () => {
 			makeParams(
 				capture.fetchMock,
 				makeAuthStorage({
-					"xai-oauth": "test-xai-oauth-token",
-					xai: "test-xai-api-key",
+					oauthToken: "test-xai-oauth-token",
+					xaiApiKey: "test-xai-api-key",
 				}),
 			),
 		);
@@ -197,139 +140,70 @@ describe("xAI web search provider", () => {
 	it("reports available when only dedicated xAI OAuth credentials exist", () => {
 		const provider = new XAIProvider();
 		const authStorage = makeAuthStorage({
-			"xai-oauth": "test-xai-oauth-token",
+			oauthToken: "test-xai-oauth-token",
 		});
 
 		expect(provider.isAvailable(authStorage)).toBe(true);
 	});
 
-	it("routes through xai when only XAI_API_KEY is set and an xai credential exists", async () => {
-		const capture = captureFetch({
-			id: "resp_xai_env_only",
-			model: "grok-4.3",
-			output_text: "xAI env answer",
-		});
-		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
-		const originalApiKey = Bun.env.XAI_API_KEY;
-		delete Bun.env.XAI_OAUTH_TOKEN;
-		Bun.env.XAI_API_KEY = "shared-xai-env-key";
-		try {
-			await searchXAI(
-				makeParams(
-					capture.fetchMock,
-					makeAuthStorage({ xai: { key: "explicit-xai-runtime-key", kind: "runtime" } }),
-				),
-			);
-		} finally {
-			if (originalOAuthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
-			else Bun.env.XAI_OAUTH_TOKEN = originalOAuthToken;
-			if (originalApiKey === undefined) delete Bun.env.XAI_API_KEY;
-			else Bun.env.XAI_API_KEY = originalApiKey;
-		}
+	it.each([
+		["a plain xAI API key", { xaiApiKey: "test-xai-api-key" }],
+		["a static key stored under xai-oauth", { xaiOAuthApiKey: "test-xai-oauth-static-key" }],
+	] as const)("rejects %s because search requires a Grok OAuth subscription", async (_caseName, credentials) => {
+		const provider = new XAIProvider();
+		const authStorage = makeAuthStorage(credentials);
+		const fetchMock = vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))) as unknown as FetchImpl;
 
-		expect(capture.capturedRequest).not.toBeNull();
-		expect(capture.capturedRequest?.headers).toMatchObject({
-			Authorization: "Bearer explicit-xai-runtime-key",
-		});
+		expect(provider.isAvailable(authStorage)).toBe(false);
+		await expect(searchXAI(makeParams(fetchMock, authStorage))).rejects.toThrow(
+			"No xAI Grok OAuth subscription credential",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("skips stored xai-oauth API keys when XAI_API_KEY would shadow them", async () => {
-		const capture = captureFetch({
-			id: "resp_xai_env_shadow",
-			model: "grok-4.3",
-			output_text: "xAI explicit account answer",
-		});
-		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
-		const originalApiKey = Bun.env.XAI_API_KEY;
-		delete Bun.env.XAI_OAUTH_TOKEN;
-		Bun.env.XAI_API_KEY = "shared-xai-env-key";
-		try {
-			await searchXAI(
-				makeParams(
-					capture.fetchMock,
-					makeAuthStorage({
-						"xai-oauth": { key: "stored-xai-oauth-api-key", kind: "api_key" },
-						xai: { key: "explicit-xai-runtime-key", kind: "runtime" },
-					}),
-				),
-			);
-		} finally {
-			if (originalOAuthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
-			else Bun.env.XAI_OAUTH_TOKEN = originalOAuthToken;
-			if (originalApiKey === undefined) delete Bun.env.XAI_API_KEY;
-			else Bun.env.XAI_API_KEY = originalApiKey;
-		}
-
-		expect(capture.capturedRequest).not.toBeNull();
-		expect(capture.capturedRequest?.headers).toMatchObject({
-			Authorization: "Bearer explicit-xai-runtime-key",
-		});
-	});
-
-	it("falls back to xai when unavailable xai-oauth OAuth resolves to the shared env key", async () => {
-		const capture = captureFetch({
-			id: "resp_xai_oauth_env_fallback",
-			model: "grok-4.3",
-			output_text: "xAI explicit account answer",
-		});
+	it("rotates to a sibling Grok subscription after an authorization failure", async () => {
+		let activeToken = "oauth-account-a";
+		let rotateCalls = 0;
 		const authStorage = {
-			resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }) {
-				expect(options?.sessionId).toBe("session-xai-test");
-				return async () => {
-					if (provider === "xai-oauth") return Bun.env.XAI_API_KEY;
-					if (provider === "xai") return "explicit-xai-runtime-key";
-					return undefined;
-				};
+			async getOAuthAccess(provider: string, sessionId?: string) {
+				expect(provider).toBe("xai-oauth");
+				expect(sessionId).toBe("session-xai-test");
+				return { accessToken: activeToken };
 			},
-			hasAuth(provider: string) {
-				return provider === "xai-oauth" || provider === "xai";
+			async rotateSessionCredential(provider: string, sessionId?: string) {
+				expect(provider).toBe("xai-oauth");
+				expect(sessionId).toBe("session-xai-test");
+				activeToken = "oauth-account-b";
+				rotateCalls += 1;
+				return true;
 			},
-			hasNonEnvCredential(provider: string) {
-				return provider === "xai-oauth" || provider === "xai";
-			},
-			getCredentialOrigin(provider: string) {
-				if (provider === "xai-oauth") return { kind: "oauth" };
-				if (provider === "xai") return { kind: "runtime" };
-				return undefined;
+			hasOAuth(provider: string) {
+				return provider === "xai-oauth";
 			},
 		} as unknown as AuthStorage;
-		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
-		const originalApiKey = Bun.env.XAI_API_KEY;
-		delete Bun.env.XAI_OAUTH_TOKEN;
-		Bun.env.XAI_API_KEY = "shared-xai-env-key";
-		try {
-			await searchXAI(makeParams(capture.fetchMock, authStorage));
-		} finally {
-			if (originalOAuthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
-			else Bun.env.XAI_OAUTH_TOKEN = originalOAuthToken;
-			if (originalApiKey === undefined) delete Bun.env.XAI_API_KEY;
-			else Bun.env.XAI_API_KEY = originalApiKey;
-		}
+		const authorizationHeaders: string[] = [];
+		const fetchMock: FetchImpl = (_input, init) => {
+			authorizationHeaders.push(new Headers(init?.headers).get("Authorization") ?? "");
+			if (authorizationHeaders.length === 1) {
+				return Promise.resolve(new Response('{"error":"expired"}', { status: 401 }));
+			}
+			return Promise.resolve(
+				new Response(JSON.stringify({ id: "resp_rotated", model: "grok-4.5", output_text: "rotated" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
 
-		expect(capture.capturedRequest).not.toBeNull();
-		expect(capture.capturedRequest?.headers).toMatchObject({
-			Authorization: "Bearer explicit-xai-runtime-key",
-		});
-	});
+		const response = await searchXAI(makeParams(fetchMock, authStorage));
 
-	it("reports xAI available through xai when only XAI_API_KEY is set", () => {
-		const provider = new XAIProvider();
-		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
-		const originalApiKey = Bun.env.XAI_API_KEY;
-		delete Bun.env.XAI_OAUTH_TOKEN;
-		Bun.env.XAI_API_KEY = "shared-xai-env-key";
-		try {
-			expect(provider.isAvailable(makeAuthStorage(undefined))).toBe(true);
-		} finally {
-			if (originalOAuthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
-			else Bun.env.XAI_OAUTH_TOKEN = originalOAuthToken;
-			if (originalApiKey === undefined) delete Bun.env.XAI_API_KEY;
-			else Bun.env.XAI_API_KEY = originalApiKey;
-		}
+		expect(response.answer).toBe("rotated");
+		expect(authorizationHeaders).toEqual(["Bearer oauth-account-a", "Bearer oauth-account-b"]);
+		expect(rotateCalls).toBe(1);
 	});
 
 	it("omits search_parameters for minimal web_search requests", async () => {
-		const capture = captureFetch({ id: "resp_minimal", model: "grok-4.3", output_text: "minimal xAI answer" });
+		const capture = captureFetch({ id: "resp_minimal", model: "grok-4.5", output_text: "minimal xAI answer" });
 
 		await searchXAI(makeParams(capture.fetchMock));
 
@@ -346,7 +220,7 @@ describe("xAI web search provider", () => {
 		["limit, numSearchResults, and recency", { limit: 0, numSearchResults: 30, recency: "day" }],
 		["oversized numSearchResults", { numSearchResults: 99 }],
 	] as const)("keeps %s local instead of sending xAI search_parameters", async (_caseName, searchParams) => {
-		const capture = captureFetch({ id: "resp_agent_tools", model: "grok-4.3", output_text: "xAI answer" });
+		const capture = captureFetch({ id: "resp_agent_tools", model: "grok-4.5", output_text: "xAI answer" });
 
 		await searchXAI({
 			...makeParams(capture.fetchMock),
@@ -390,7 +264,7 @@ describe("xAI web search provider", () => {
 	it("maps output_text, URL citation annotations, top-level citations, id, model, usage, and auth mode", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_123",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Top-level xAI answer",
 			annotations: [
 				{
@@ -441,8 +315,8 @@ describe("xAI web search provider", () => {
 			provider: "xai",
 			answer: "Top-level xAI answer",
 			requestId: "resp_xai_123",
-			model: "grok-4.3",
-			authMode: "api_key",
+			model: "grok-4.5",
+			authMode: "oauth",
 			usage: {
 				inputTokens: 12,
 				outputTokens: 8,
@@ -497,7 +371,7 @@ describe("xAI web search provider", () => {
 		const urls = citationUrls("default-cap", 12);
 		const capture = captureFetch({
 			id: "resp_default_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Default capped xAI answer",
 			citations: urls,
 		});
@@ -520,7 +394,7 @@ describe("xAI web search provider", () => {
 		const urls = citationUrls("max-cap", 35);
 		const capture = captureFetch({
 			id: "resp_max_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Max capped xAI answer",
 			citations: urls,
 		});
@@ -545,7 +419,7 @@ describe("xAI web search provider", () => {
 	it("caps parsed sources and citations locally without changing Agent Tools request shape", async () => {
 		const capture = captureFetch({
 			id: "resp_local_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Capped xAI answer",
 			annotations: [
 				{
@@ -613,7 +487,7 @@ describe("xAI web search provider", () => {
 	it("uses numSearchResults before limit for the local xAI output cap", async () => {
 		const capture = captureFetch({
 			id: "resp_num_search_results_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "numSearchResults capped xAI answer",
 			annotations: [
 				{
@@ -657,7 +531,7 @@ describe("xAI web search provider", () => {
 	it("falls back to output content parts when output_text is absent", async () => {
 		const capture = captureFetch({
 			id: "resp_content_parts",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output: [
 				{
 					content: [
@@ -704,12 +578,12 @@ describe("xAI web search provider", () => {
 
 		try {
 			await searchXAI(makeParams(fetchMock, makeAuthStorage({})));
-			expect.unreachable("missing xAI credentials should reject");
+			expect.unreachable("missing Grok subscription credentials should reject");
 		} catch (error) {
 			expect(error).toBeInstanceOf(Error);
 			expect(error).toHaveProperty(
 				"message",
-				'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
+				"No xAI Grok OAuth subscription credential. Run /login → xAI Grok OAuth (SuperGrok or X Premium+).",
 			);
 		}
 		expect(fetchMock).not.toHaveBeenCalled();

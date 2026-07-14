@@ -423,10 +423,11 @@ if "__omp_prelude_loaded__" not in globals():
         text = res.get("text") if isinstance(res, dict) else res
         return json.loads(text) if schema is not None else text
 
-    def agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
+    def agent(prompt, *, agent=None, model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
         """Run a subagent and return its final output.
 
-        `agent` selects the subagent definition (default "task"). Pass
+        When `agent` is omitted, the host selects the active session profile's
+        default subagent. Pass `agent` to select a specific definition. Pass
         `model` to override that agent's model, `label` for the output artifact
         id, and `schema` to request structured JSON output; when `schema` is
         supplied the parsed object is returned. Share background by writing a

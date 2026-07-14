@@ -71,6 +71,23 @@ describe("Settings", () => {
 		await tempDir?.remove();
 	});
 	describe("defaults", () => {
+		it("pins the bundled model role routing defaults without persisting them", async () => {
+			const modelRoles = {
+				default: "openai-codex/gpt-5.6-sol:high",
+				smol: "xai-oauth/grok-4.5:high",
+				slow: "xai-oauth/grok-4.5:high",
+				plan: "openai-codex/gpt-5.6-sol:xhigh",
+				designer: "openai-codex/gpt-5.6-sol:xhigh",
+				tiny: "xai-oauth/grok-4.5:off",
+				advisor: "openai-codex/gpt-5.6-sol:xhigh",
+			};
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("modelRoles")).toEqual(modelRoles);
+			expect(getDefault("modelRoles")).toEqual(modelRoles);
+			expect(await readSettings()).toEqual({});
+		});
+
 		it("keeps eight inline images live by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
@@ -355,6 +372,29 @@ describe("Settings", () => {
 	});
 
 	describe("model role overrides", () => {
+		it("preserves bundled defaults when saving the first role override", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+			await settings.flush();
+
+			expect((await readSettings()).modelRoles).toEqual({
+				...getDefault("modelRoles"),
+				smol: "anthropic/claude-haiku-4-5",
+			});
+		});
+
+		it("preserves bundled defaults under a partial runtime role override", () => {
+			const settings = Settings.isolated();
+
+			settings.overrideModelRoles({ smol: "anthropic/claude-haiku-4-5" });
+
+			expect(settings.getModelRoles()).toEqual({
+				...getDefault("modelRoles"),
+				smol: "anthropic/claude-haiku-4-5",
+			});
+		});
+
 		it("does not persist temporary default model overrides when another role is saved", async () => {
 			await writeSettings({
 				modelRoles: { default: "anthropic/claude-sonnet-4-5" },
