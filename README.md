@@ -22,6 +22,9 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
 
+> [!IMPORTANT]
+> 使用本仓库前，必须同时具备有效的 OpenAI GPT（ChatGPT/Codex）订阅和 xAI Grok 订阅；缺少任一订阅，默认模型角色和 Web Search 将无法正常使用。
+
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
 **40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
