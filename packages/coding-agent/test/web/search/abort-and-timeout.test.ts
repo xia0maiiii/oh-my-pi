@@ -6,8 +6,8 @@
  *
  * The fix has two halves: a hard-timeout safety net wrapped around every
  * provider's outbound fetch (via the shared `withHardTimeout` helper), and
- * an abort re-throw in the provider-fallback loop so the session sees a real
- * cancellation instead of "all providers failed". The provider wiring is
+ * an abort re-throw in search execution so the session sees a real
+ * cancellation instead of an xAI provider failure. The provider wiring is
  * spot-checked on anthropic (LLM-backed) and brave (pure search API); the
  * helper itself is exercised directly.
  */
@@ -16,15 +16,24 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
+import { runSearchQuery, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchBrave } from "@oh-my-pi/pi-coding-agent/web/search/providers/brave";
 import { withHardTimeout } from "@oh-my-pi/pi-coding-agent/web/search/providers/utils";
-import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import {
+	SearchProviderError,
+	type SearchProviderId,
+	type SearchResponse,
+} from "@oh-my-pi/pi-coding-agent/web/search/types";
 
-const FAKE_SESSION = {} as ToolSession;
+const fakeAuthStorage = {
+	getOAuthAccess: async () => undefined,
+	rotateSessionCredential: async () => false,
+	hasOAuth: () => false,
+} as unknown as AuthStorage;
+const FAKE_SESSION = { authStorage: fakeAuthStorage } as ToolSession;
 const fakeStorage = {
 	listAuthCredentials: () => [],
 	updateAuthCredential: () => undefined,
@@ -124,6 +133,7 @@ describe("Anthropic provider hard-timeout wiring", () => {
 			authStorage: {
 				getApiKey: async () => "sk-fallback",
 				resolver: vi.fn(() => async () => "sk-fallback"),
+				getOAuthAccountId: () => undefined,
 			} as unknown as AuthStorage,
 		});
 
@@ -159,53 +169,80 @@ describe("Brave provider hard-timeout wiring", () => {
 describe("executeSearch abort propagation", () => {
 	afterEach(() => vi.restoreAllMocks());
 
-	function fakeProvider(behaviour: (params: SearchParams) => Promise<SearchResponse>): provider.SearchProvider {
-		const id: SearchProviderId = "anthropic";
+	function fakeProvider(
+		id: SearchProviderId,
+		behaviour: (params: SearchParams) => Promise<SearchResponse>,
+	): provider.SearchProvider {
 		return {
 			id,
-			label: "Anthropic",
+			label: id === "xai" ? "xAI" : id,
 			isAvailable: () => true,
 			isExplicitlyAvailable: () => true,
 			search: behaviour,
 		};
 	}
 
-	it("surfaces caller cancellation as ToolAbortError instead of falling through to the next provider", async () => {
-		// Two providers: the first throws an AbortError after the caller aborted,
-		// the second would happily return a value. Pre-fix, executeSearch would
-		// fall through to provider B and report success; post-fix, the abort
-		// re-throw stops the loop immediately.
-		const secondProviderSearch = vi.fn();
-		vi.spyOn(provider, "resolveProviderChain").mockResolvedValue([
-			fakeProvider(async () => {
-				throw new DOMException("aborted", "AbortError");
-			}),
-			fakeProvider(secondProviderSearch),
-		]);
+	it("surfaces caller cancellation as ToolAbortError on the xAI route", async () => {
+		const xaiSearch = vi.fn(async () => {
+			throw new DOMException("aborted", "AbortError");
+		});
+		vi.spyOn(provider, "getSearchProvider").mockResolvedValue(fakeProvider("xai", xaiSearch));
 
 		const tool = new WebSearchTool(FAKE_SESSION);
 		const ac = new AbortController();
 		ac.abort();
 
 		await expect(tool.execute("test-id", { query: "anything" }, ac.signal)).rejects.toBeInstanceOf(ToolAbortError);
-		expect(secondProviderSearch).not.toHaveBeenCalled();
+		expect(xaiSearch).toHaveBeenCalledTimes(1);
 	});
 
-	it("still reports provider failures as a tool result when the caller has not aborted", async () => {
-		// Defensive: the abort re-throw must NOT alter normal provider-error
-		// flow. A genuine provider error should still produce an error result
-		// rather than throwing.
-		vi.spyOn(provider, "resolveProviderChain").mockResolvedValue([
-			fakeProvider(async () => {
-				throw new Error("upstream 500");
-			}),
-		]);
+	it("reports an xAI failure without falling back to another provider", async () => {
+		const xaiSearch = vi.fn(async () => {
+			throw new SearchProviderError("xai", "forbidden", 403);
+		});
+		const getProvider = vi.spyOn(provider, "getSearchProvider").mockResolvedValue(fakeProvider("xai", xaiSearch));
 
 		const tool = new WebSearchTool(FAKE_SESSION);
 		const result = await tool.execute("test-id", { query: "anything" });
 		const block = result.content[0];
 		expect(block?.type).toBe("text");
-		expect(block && "text" in block ? block.text : "").toContain("upstream 500");
-		expect(result.details?.error).toContain("upstream 500");
+		expect(block && "text" in block ? block.text : "").toContain("xAI Grok OAuth authorization failed (403)");
+		expect(result.details?.error).toBe(
+			"xAI Grok OAuth authorization failed (403). Re-run /login and verify the account has SuperGrok or X Premium+.",
+		);
+		expect(result.details?.response.provider).toBe("xai");
+		expect(getProvider.mock.calls).toEqual([["xai"]]);
+		expect(xaiSearch).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports an empty xAI response without falling back", async () => {
+		const xaiSearch = vi.fn(
+			async (): Promise<SearchResponse> => ({
+				provider: "xai",
+				sources: [],
+			}),
+		);
+		const getProvider = vi.spyOn(provider, "getSearchProvider").mockResolvedValue(fakeProvider("xai", xaiSearch));
+
+		const tool = new WebSearchTool(FAKE_SESSION);
+		const result = await tool.execute("test-id", { query: "anything" });
+
+		const block = result.content[0];
+		expect(block?.type).toBe("text");
+		expect(block && "text" in block ? block.text : "").toContain("xAI returned no renderable search content");
+		expect(result.details?.error).toContain("xAI returned no renderable search content");
+		expect(result.details?.response.provider).toBe("xai");
+		expect(getProvider.mock.calls).toEqual([["xai"]]);
+		expect(xaiSearch).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects an explicitly requested non-xAI provider before search execution", async () => {
+		const getProvider = vi.spyOn(provider, "getSearchProvider");
+
+		const result = await runSearchQuery({ query: "anything", provider: "brave" }, { authStorage: fakeAuthStorage });
+
+		expect(result.details?.error).toBe('Web search is locked to xAI Grok OAuth; provider "brave" is not allowed.');
+		expect(result.details?.response).toEqual({ provider: "none", sources: [] });
+		expect(getProvider).not.toHaveBeenCalled();
 	});
 });

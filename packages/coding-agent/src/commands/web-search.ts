@@ -1,16 +1,15 @@
 /**
- * Test web search providers.
+ * Search the web through xAI Grok OAuth.
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runSearchCommand, type SearchCommandArgs } from "../cli/web-search-cli";
-import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
 
-const PROVIDERS: Array<string> = ["auto", ...SEARCH_PROVIDER_ORDER];
+const PROVIDERS: NonNullable<SearchCommandArgs["provider"]>[] = ["auto", "xai"];
 
 const RECENCY: NonNullable<SearchCommandArgs["recency"]>[] = ["day", "week", "month", "year"];
 
 export default class Search extends Command {
-	static description = "Test web search providers";
+	static description = "Search the web through xAI Grok OAuth";
 
 	static aliases = ["q"];
 

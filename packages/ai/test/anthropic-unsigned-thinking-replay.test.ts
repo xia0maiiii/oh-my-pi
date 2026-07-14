@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
+import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
 	Message,
@@ -101,7 +102,30 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		expect(blocks[1]).toEqual({ type: "text", text: "Sure." });
 	});
 
-	it("sanitizes lone surrogates in cross-API tool arguments only", () => {
+	it("sends context_management for API-key Anthropic-compatible thinking requests", async () => {
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamAnthropic(
+			makeModel(),
+			{ systemPrompt: [], messages: [makeUser("continue")] },
+			{
+				apiKey: "sk-ant-api-test",
+				signal: AbortSignal.abort(),
+				thinkingEnabled: true,
+				onPayload: payload => resolve(payload),
+			},
+		);
+
+		const payload = (await promise) as {
+			thinking?: { type?: string };
+			context_management?: { edits?: Array<{ type?: string; keep?: string }> };
+		};
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.context_management).toEqual({
+			edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+		});
+	});
+
+	it("sanitizes lone surrogates in tool arguments regardless of origin API", () => {
 		const loneSurrogate = "broken \ud83d end";
 		const makeToolCallAssistant = (api: AssistantMessage["api"]): AssistantMessage => ({
 			role: "assistant",
@@ -135,11 +159,57 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		expect(crossToolUse.input.text).toBe("broken \ufffd end");
 		expect((crossToolUse.input.nested as { parts: string[] }).parts[0]).toBe("broken \ufffd end");
 
-		// Same-API replay stays byte-identical (the args came from Anthropic's own
-		// JSON; rewriting them would destabilize prompt-cache prefixes).
+		// Same-API replay sanitizes too: the model itself can emit lone-surrogate
+		// escapes in its own tool-argument JSON (streamed out fine, 400 on replay).
 		const sameBlocks = assistantWireBlocks([makeUser(), makeToolCallAssistant("anthropic-messages")], makeModel());
 		const sameToolUse = sameBlocks.find(block => block.type === "tool_use") as WireToolUseBlock;
-		expect(sameToolUse.input.text).toBe(loneSurrogate);
+		expect(sameToolUse.input.text).toBe("broken \ufffd end");
+		expect((sameToolUse.input.nested as { parts: string[] }).parts[0]).toBe("broken \ufffd end");
+	});
+
+	it("sanitizes payload replacements before SDK JSON serialization", async () => {
+		const splitSurrogate = `render \`"icon.ghost": "\\ud83d${String.fromCharCode(0xdc7b)}"\``;
+		const { promise: bodyPromise, resolve } = Promise.withResolvers<string>();
+		const controller = new AbortController();
+		const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const raw = init?.body;
+			resolve(typeof raw === "string" ? raw : new TextDecoder().decode(raw as Uint8Array));
+			controller.abort();
+			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		streamAnthropic(
+			makeModel(),
+			{ systemPrompt: [], messages: [makeUser("continue")] },
+			{
+				apiKey: "sk-ant-test",
+				signal: controller.signal,
+				fetch: fakeFetch,
+				onPayload: payload => {
+					const request = payload as { messages?: Array<{ role: string; content: unknown }> };
+					if (!Array.isArray(request.messages)) throw new Error("Anthropic payload missing messages");
+					request.messages.push({
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "toolu_surrogate",
+								name: "write",
+								input: { text: splitSurrogate },
+							},
+						],
+					});
+					return request;
+				},
+			},
+		);
+
+		const body = await bodyPromise;
+		expect(body).not.toContain("\\udc7b");
+		expect(body).toContain("\ufffd");
 	});
 
 	it("covers the Xiaomi MiMo Anthropic-compatible reporter configuration without provider allowlists", () => {
@@ -165,7 +235,7 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		const model = makeModel({ provider: "anthropic", baseUrl: "https://api.anthropic.com" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("internal scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("internal scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "internal scratch"));
 	});
 
 	it("treats a missing baseUrl as official Anthropic (resolveAnthropicBaseUrl default)", () => {
@@ -176,14 +246,14 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		const model = makeModel({ provider: "anthropic", baseUrl: "" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("internal scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("internal scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "internal scratch"));
 	});
 
 	it("still degrades unsigned thinking to text for non-reasoning unknown endpoints", () => {
 		const model = makeModel({ reasoning: false, baseUrl: "https://plain.example.com/anthropic" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "scratch"));
 	});
 
 	it("keeps thinking → tool_use pairing intact across continuation conversion", () => {

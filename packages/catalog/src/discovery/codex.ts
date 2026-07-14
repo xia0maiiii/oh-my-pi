@@ -1,6 +1,7 @@
-import * as z from "zod/v4";
+import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 import type { ModelSpec } from "../types";
-import { isRecord } from "../utils";
+import { discoveryFetch, isRecord } from "../utils";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
@@ -8,37 +9,35 @@ const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
 const DEFAULT_CODEX_CLIENT_VERSION = "0.99.0";
 const NPM_CODEX_LATEST_URL = "https://registry.npmjs.org/@openai%2Fcodex/latest";
+const CODEX_REMOTE_COMPACTION = {
+	enabled: true,
+	api: "openai-codex-responses",
+	v2StreamingEnabled: true,
+} as const;
 
-const codexReasoningPresetSchema = z
-	.object({
-		effort: z.unknown().optional(),
-	})
-	.loose();
+const codexReasoningPresetSchema = type({
+	"effort?": "unknown",
+});
 
-const codexModelEntrySchema = z
-	.object({
-		slug: z.unknown().optional(),
-		id: z.unknown().optional(),
-		display_name: z.unknown().optional(),
-		context_window: z.unknown().optional(),
-		default_reasoning_level: z.unknown().optional(),
-		supported_reasoning_levels: z.unknown().optional(),
-		input_modalities: z.unknown().optional(),
-		supported_in_api: z.unknown().optional(),
-		priority: z.unknown().optional(),
-		prefer_websockets: z.unknown().optional(),
-	})
-	.loose();
+const codexModelEntrySchema = type({
+	"slug?": "unknown",
+	"id?": "unknown",
+	"display_name?": "unknown",
+	"context_window?": "unknown",
+	"default_reasoning_level?": "unknown",
+	"supported_reasoning_levels?": "unknown",
+	"input_modalities?": "unknown",
+	"supported_in_api?": "unknown",
+	"priority?": "unknown",
+	"prefer_websockets?": "unknown",
+});
 
-const codexModelsResponseSchema = z
-	.object({
-		models: z.array(z.unknown()).optional(),
-		data: z.array(z.unknown()).optional(),
-	})
-	.loose();
+const codexModelsResponseSchema = type({
+	"models?": "unknown[]",
+	"data?": "unknown[]",
+});
 
-type CodexModelEntry = z.infer<typeof codexModelEntrySchema>;
-
+type CodexModelEntry = typeof codexModelEntrySchema.infer;
 interface NormalizedCodexModel {
 	model: ModelSpec<"openai-codex-responses">;
 	priority: number;
@@ -83,7 +82,7 @@ export interface CodexModelDiscoveryResult {
  * Returns `{ models: [] }` when a route succeeds but yields no usable models.
  */
 export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Promise<CodexModelDiscoveryResult | null> {
-	const fetchFn = options.fetchFn ?? fetch;
+	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);
 	const headers = buildCodexHeaders(options);
@@ -170,7 +169,7 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions): Headers {
 
 async function resolveCodexClientVersion(
 	clientVersion: string | undefined,
-	fetchFn: typeof fetch,
+	fetchFn: FetchImpl,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	const normalizedClientVersion = normalizeClientVersion(clientVersion);
@@ -216,12 +215,12 @@ function isAbortError(error: unknown): error is Error {
 }
 
 function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"openai-codex-responses">[] | null {
-	const parsedResponse = codexModelsResponseSchema.safeParse(payload);
-	if (!parsedResponse.success) {
+	const parsedResponse = codexModelsResponseSchema(payload);
+	if (parsedResponse instanceof type.errors) {
 		return null;
 	}
 
-	const entries = parsedResponse.data.models ?? parsedResponse.data.data ?? [];
+	const entries = parsedResponse.models ?? parsedResponse.data ?? [];
 	const normalized: NormalizedCodexModel[] = [];
 	for (const entry of entries) {
 		const model = normalizeCodexModelEntry(entry, baseUrl);
@@ -241,12 +240,12 @@ function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"ope
 }
 
 function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCodexModel | null {
-	const parsedEntry = codexModelEntrySchema.safeParse(entry);
-	if (!parsedEntry.success) {
+	const parsedEntry = codexModelEntrySchema(entry);
+	if (parsedEntry instanceof type.errors) {
 		return null;
 	}
 
-	const payload: CodexModelEntry = parsedEntry.data;
+	const payload: CodexModelEntry = parsedEntry;
 	const slug = toNonEmptyString(payload.slug) ?? toNonEmptyString(payload.id);
 	if (!slug) {
 		return null;
@@ -276,6 +275,7 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 			reasoning,
 			input,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			remoteCompaction: CODEX_REMOTE_COMPACTION,
 			contextWindow,
 			maxTokens,
 			...(preferWebsockets ? { preferWebsockets: true } : {}),
@@ -295,11 +295,11 @@ function supportsReasoning(defaultReasoningLevel: unknown, supportedReasoningLev
 	}
 
 	for (const level of supportedReasoningLevels) {
-		const parsedLevel = codexReasoningPresetSchema.safeParse(level);
-		if (!parsedLevel.success) {
+		const parsedLevel = codexReasoningPresetSchema(level);
+		if (parsedLevel instanceof type.errors) {
 			continue;
 		}
-		const effort = toNonEmptyString(parsedLevel.data.effort)?.toLowerCase();
+		const effort = toNonEmptyString(parsedLevel.effort)?.toLowerCase();
 		if (effort && effort !== "none") {
 			return true;
 		}

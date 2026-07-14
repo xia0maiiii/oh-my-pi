@@ -16,7 +16,9 @@ const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mi
  * by the OpenAI Codex and Google Gemini retry helpers.
  *
  * Header sources (checked in order):
+ *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (numeric seconds, or HTTP date)
+ *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
  *  - `x-ratelimit-reset` (Unix epoch seconds)
  *  - `x-ratelimit-reset-after` (seconds)
  *
@@ -31,12 +33,28 @@ const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mi
 export function extractRetryHint(source: Response | Headers | null | undefined, body?: string): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
+		const retryAfterMs = headers.get("retry-after-ms");
+		if (retryAfterMs) {
+			const ms = Number(retryAfterMs);
+			if (Number.isFinite(ms) && ms >= 0) return ms;
+		}
 		const retryAfter = headers.get("retry-after");
 		if (retryAfter) {
 			const seconds = Number(retryAfter);
 			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
 			const parsedDate = Date.parse(retryAfter);
 			if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+		}
+		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
+		if (rateLimitResetMs) {
+			const value = Number(rateLimitResetMs);
+			if (Number.isFinite(value) && value > 0) {
+				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
+				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
+				if (targetMs === undefined) return value;
+				const delta = targetMs - Date.now();
+				if (delta > 0) return delta;
+			}
 		}
 		const rateLimitReset = headers.get("x-ratelimit-reset");
 		if (rateLimitReset) {
@@ -129,6 +147,20 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * mock during tests.
 	 */
 	fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+	/**
+	 * Optional retry gate for HTTP responses whose status is retryable. Receives a
+	 * cloned body string so callers can fail fast on deterministic provider
+	 * failures that happen to use a 5xx status.
+	 */
+	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
+	/**
+	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
+	 * disables Bun's native ~300s pre-response timeout (callers that own a
+	 * configurable first-event/idle watchdog or an external `AbortSignal`
+	 * supply this so the runtime ceiling cannot pre-empt them); a positive
+	 * number sets a custom ceiling in ms. Bare browser/Node fetch ignores it.
+	 */
+	timeout?: number | false;
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -152,7 +184,9 @@ export async function fetchWithRetry(
 		maxDelayMs = DEFAULT_MAX_DELAY_MS,
 		defaultDelayMs,
 		prepareInit,
+		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
+		timeout = false,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -160,7 +194,18 @@ export async function fetchWithRetry(
 	for (let attempt = 0; ; attempt++) {
 		if (signal?.aborted) throw new Error("Request was aborted");
 		const requestUrl = typeof url === "function" ? url(attempt) : url;
-		const init = prepareInit ? mergeInit(baseInit, await prepareInit(attempt)) : baseInit;
+		// `timeout` is destructured out of `baseInit`, so forward it to the underlying
+		// fetch on the no-`prepareInit` path too. Without this, callers that pass
+		// `timeout: false` (every streaming provider, to disable Bun's native ~300s
+		// fetch ceiling in favor of their own first-event/idle watchdog) had it
+		// silently dropped, so long-running streams were killed at ~300s (issue #602).
+		// Only forward when the caller actually set `timeout`, so callers that never
+		// set it keep Bun's default ceiling.
+		const init = prepareInit
+			? mergeInit(baseInit, await prepareInit(attempt), timeout)
+			: "timeout" in options
+				? ({ ...baseInit, timeout } as unknown as RequestInit)
+				: baseInit;
 
 		let response: Response;
 		try {
@@ -176,7 +221,10 @@ export async function fetchWithRetry(
 		if (!isRetryableStatus(response.status)) return response;
 		if (attempt + 1 >= maxAttempts) return response;
 
-		const hint = extractRetryHint(response, await response.clone().text());
+		const retryBody = await response.clone().text();
+		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
+
+		const hint = extractRetryHint(response, retryBody);
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
@@ -184,8 +232,8 @@ export async function fetchWithRetry(
 	}
 }
 
-function mergeInit(base: RequestInit, overlay: RequestInit): RequestInit {
-	const merged: RequestInit = { ...base, ...overlay };
+function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | false): RequestInit {
+	const merged = { ...base, ...overlay, timeout } as unknown as RequestInit;
 	if (base.headers || overlay.headers) {
 		const baseHeaders = new Headers(base.headers ?? undefined);
 		const overlayHeaders = new Headers(overlay.headers ?? undefined);

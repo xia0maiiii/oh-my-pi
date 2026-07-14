@@ -38,6 +38,8 @@ export interface ScreenshotResult {
 export interface SessionSnapshot {
 	cwd: string;
 	browserScreenshotDir?: string;
+	/** Force non-WebP screenshot encoding (e.g. for Ollama). Unset honors `OMP_NO_WEBP`. */
+	excludeWebP?: boolean;
 }
 
 export type WorkerInitPayload =
@@ -64,7 +66,7 @@ export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunEr
 export type WorkerInbound =
 	| { type: "init"; payload: WorkerInitPayload }
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
-	| { type: "abort"; id: string }
+	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 

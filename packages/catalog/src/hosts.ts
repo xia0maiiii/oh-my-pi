@@ -16,7 +16,7 @@ interface HostClassSpec {
 	readonly providers?: readonly string[];
 	/** Provider-id prefixes that imply this host class (e.g. `xiaomi-token-plan-`). */
 	readonly providerPrefixes?: readonly string[];
-	/** Case-insensitive substrings matched against the base URL. */
+	/** Lowercase ASCII substrings matched case-insensitively against the base URL. */
 	readonly urlMarkers: readonly string[];
 	// Strict hostname matching is intentionally not modeled here: the one
 	// auth-sensitive consumer (Anthropic official-endpoint) parses the URL
@@ -42,10 +42,12 @@ export const KNOWN_HOSTS = {
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
 	alibabaDashscope: { providers: ["alibaba-coding-plan"], urlMarkers: ["dashscope"] },
+	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
 	xai: { providers: ["xai"], urlMarkers: ["api.x.ai"] },
 	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
+	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
 	fireworks: { urlMarkers: ["fireworks.ai"] },
 	groq: { providers: ["groq"], urlMarkers: ["api.groq.com"] },
@@ -54,8 +56,12 @@ export const KNOWN_HOSTS = {
 		urlMarkers: ["api.minimax.io", "api.minimaxi.com"],
 	},
 	qwenPortal: { providers: ["qwen-portal"], urlMarkers: ["portal.qwen.ai"] },
+	/** NVIDIA NIM (`integrate.api.nvidia.com`). Qwen NIM endpoints take `chat_template_kwargs.enable_thinking`, never top-level `enable_thinking`. */
+	nvidia: { providers: ["nvidia"], urlMarkers: ["integrate.api.nvidia.com"] },
 	moonshotNative: { providers: ["moonshot", "kimi-code"], urlMarkers: ["api.moonshot.ai", "api.kimi.com"] },
 	opencode: { providers: ["opencode-go", "opencode-zen"], urlMarkers: ["opencode.ai"] },
+	/** ZenMux's Anthropic-compatible proxy (`zenmux.ai/api/anthropic`) forwards to signature-enforcing Anthropic. */
+	zenmux: { providers: ["zenmux"], urlMarkers: ["zenmux.ai"] },
 	chutes: { urlMarkers: ["chutes.ai"] },
 } as const satisfies Record<string, HostClassSpec>;
 
@@ -65,9 +71,8 @@ export type KnownHost = keyof typeof KNOWN_HOSTS;
 export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): boolean {
 	if (!baseUrl) return false;
 	const spec: HostClassSpec = KNOWN_HOSTS[host];
-	const normalized = baseUrl.toLowerCase();
 	for (const marker of spec.urlMarkers) {
-		if (normalized.includes(marker)) return true;
+		if (includesAsciiCaseInsensitive(baseUrl, marker)) return true;
 	}
 	return false;
 }
@@ -86,6 +91,19 @@ export function modelMatchesHost(model: { provider: string; baseUrl: string }, h
 		}
 	}
 	return hostMatchesUrl(model.baseUrl, host);
+}
+
+function includesAsciiCaseInsensitive(value: string, lowerNeedle: string): boolean {
+	const needleLength = lowerNeedle.length;
+	const end = value.length - needleLength;
+	for (let start = 0; start <= end; start++) {
+		let offset = 0;
+		for (; offset < needleLength; offset++) {
+			if ((value.charCodeAt(start + offset) | 0x20) !== lowerNeedle.charCodeAt(offset)) break;
+		}
+		if (offset === needleLength) return true;
+	}
+	return false;
 }
 
 // --- Endpoint-shape predicates (URL path/verb shapes, not vendor hosts) ---

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -6,14 +6,15 @@ import {
 	ALL_SCENES,
 	CURRENT_SETUP_VERSION,
 	markSetupWizardComplete,
+	runSetupWizard,
 	type SetupScene,
 	type SetupSceneHost,
 	selectSetupScenes,
 } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard";
 import { WebSearchTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/web-search";
+import { SetupWizardComponent } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/wizard-overlay";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -114,6 +115,146 @@ describe("setup wizard persistence", () => {
 		await markSetupWizardComplete(settings);
 		expect(settings.get("setupVersion")).toBe(CURRENT_SETUP_VERSION);
 	});
+
+	it("can run a targeted scene without setup-version or welcome-intro side effects", async () => {
+		const settings = Settings.isolated({ setupVersion: 0 });
+		const hideOverlay = mock(() => {});
+		const setFocus = mock((_component: unknown) => {});
+		const requestRender = mock(() => {});
+		const playWelcomeIntro = mock(() => {});
+		let component: SetupWizardComponent | undefined;
+		const scene: SetupScene = {
+			id: "providers",
+			title: "providers",
+			minVersion: 1,
+			mount: host => ({
+				title: "providers",
+				onMount: () => host.finish("done"),
+				render: () => [],
+				invalidate: () => {},
+			}),
+		};
+		const ctx = {
+			settings,
+			playWelcomeIntro,
+			ui: {
+				terminal: { rows: 24 },
+				showOverlay: (nextComponent: SetupWizardComponent) => {
+					component = nextComponent;
+					return { hide: hideOverlay };
+				},
+				setFocus,
+				requestRender,
+			},
+		} as unknown as InteractiveModeContext;
+
+		const pending = runSetupWizard(ctx, [scene], { markComplete: false, playWelcomeIntro: false });
+		component?.handleInput?.("\n");
+		component?.handleInput?.("\n");
+		await pending;
+
+		expect(settings.get("setupVersion")).toBe(0);
+		expect(playWelcomeIntro).not.toHaveBeenCalled();
+		expect(hideOverlay).toHaveBeenCalledTimes(1);
+		expect(setFocus).toHaveBeenCalled();
+	});
+});
+describe("setup wizard mouse routing", () => {
+	it("synthesizes arrow keys from wheel notches for scenes without routeMouse", () => {
+		const received: string[] = [];
+		const scene: SetupScene = {
+			id: "scrollable",
+			title: "scrollable",
+			minVersion: 1,
+			mount: () => ({
+				title: "scrollable",
+				handleInput: (data: string) => received.push(data),
+				render: () => [],
+				invalidate: () => {},
+			}),
+		};
+		const ctx = {
+			settings: Settings.isolated(),
+			ui: {
+				terminal: { rows: 24 },
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+		} as unknown as InteractiveModeContext;
+		const component = new SetupWizardComponent(ctx, [scene]);
+		try {
+			void component.run();
+			// Left click during the splash advances into the scene, like Enter.
+			component.handleInput("\x1b[<0;5;5M");
+			component.handleInput("\x1b[<64;10;5M"); // wheel up
+			component.handleInput("\x1b[<65;10;5M"); // wheel down
+			component.handleInput("\x1b[<35;10;5M"); // pointer motion — swallowed
+			component.handleInput("\x1b[<0;10;5M"); // click in scene — swallowed
+			expect(received).toEqual(["\x1b[A", "\x1b[B"]);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("routes hit-tested mouse events at scene-local coordinates to scenes with routeMouse", async () => {
+		await initTheme(false, "unicode", false, "titanium", "light");
+		const routed: { kind: string; line: number; col: number }[] = [];
+		const keys: string[] = [];
+		const scene: SetupScene = {
+			id: "mouse",
+			title: "mouse",
+			minVersion: 1,
+			mount: () => ({
+				title: "mouse",
+				handleInput: (data: string) => keys.push(data),
+				routeMouse: (event, line, col) => {
+					const kind =
+						event.wheel !== null
+							? `wheel:${event.wheel}`
+							: event.motion
+								? "motion"
+								: event.leftClick
+									? "click"
+									: "other";
+					routed.push({ kind, line, col });
+				},
+				render: () => ["MARKER-ROW"],
+				invalidate: () => {},
+			}),
+		};
+		const ctx = {
+			settings: Settings.isolated(),
+			ui: {
+				terminal: { rows: 24 },
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+		} as unknown as InteractiveModeContext;
+		const component = new SetupWizardComponent(ctx, [scene]);
+		try {
+			void component.run();
+			component.handleInput("\r"); // splash → scene
+			await Bun.sleep(500); // let the splash→scene dissolve (420ms) finish so the frame is the scene
+			const frame = component.render(80);
+			const row = frame.findIndex(line => line.includes("MARKER-ROW"));
+			expect(row).toBeGreaterThan(0);
+			const indent = /^ */.exec(frame[row])?.[0].length ?? 0;
+			expect(indent).toBeGreaterThan(0);
+			// SGR reports are 1-based; two columns into the marker text.
+			component.handleInput(`\x1b[<35;${indent + 3};${row + 1}M`);
+			component.handleInput(`\x1b[<0;${indent + 3};${row + 1}M`);
+			component.handleInput("\x1b[<64;1;1M"); // wheel forwards regardless of pointer position
+			expect(routed.slice(0, 2)).toEqual([
+				{ kind: "motion", line: 0, col: 2 },
+				{ kind: "click", line: 0, col: 2 },
+			]);
+			expect(routed[2]?.kind).toBe("wheel:-1");
+			// routeMouse scenes get no synthesized arrows and no raw SGR bytes.
+			expect(keys).toEqual([]);
+		} finally {
+			component.dispose();
+		}
+	});
 });
 
 describe("setup wizard theme previews", () => {
@@ -184,13 +325,15 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("exposes every web-search provider preference in the schema-backed TUI list", () => {
+	it("defaults to xAI and exposes only Grok-routed preferences", () => {
 		const schema = SETTINGS_SCHEMA["providers.webSearch"];
-		expect(schema.values).toEqual(SEARCH_PROVIDER_PREFERENCES);
-		expect(schema.ui.options).toEqual(SEARCH_PROVIDER_OPTIONS);
+		expect(schema.values).toEqual(["auto", "xai"]);
+		expect(schema.default).toBe("xai");
+		expect(schema.ui.options.map(option => option.value)).toEqual(["auto", "xai"]);
+		expect(Settings.isolated().get("providers.webSearch")).toBe("xai");
 	});
 
-	it("persists the highlighted provider as the web search preference", async () => {
+	it("persists the default xAI selection", async () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -204,17 +347,16 @@ describe("setup wizard web search tab", () => {
 		} as unknown as SetupSceneHost;
 
 		const tab = new WebSearchTab(host);
-		tab.handleInput("\x1b[B"); // move off "auto" to the next provider
 		tab.handleInput("\n"); // confirm the highlighted provider
 		await Bun.sleep(20);
 
-		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
-		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearch")).toBe(expected);
+		expect(settings.get("providers.webSearch")).toBe("xai");
+		expect(settings.isConfigured("providers.webSearch")).toBe(true);
 	});
 
-	it("can select the last provider in the setup TUI list", async () => {
+	it("can move from the auto alias to xAI", async () => {
 		const settings = Settings.isolated();
+		settings.set("providers.webSearch", "auto");
 		const host = {
 			ctx: {
 				settings,
@@ -227,14 +369,11 @@ describe("setup wizard web search tab", () => {
 		} as unknown as SetupSceneHost;
 
 		const tab = new WebSearchTab(host);
-		for (let i = 1; i < SEARCH_PROVIDER_OPTIONS.length; i++) {
-			tab.handleInput("\x1b[B");
-		}
+		tab.handleInput("\x1b[B");
 		tab.handleInput("\n");
 		await Bun.sleep(20);
 
-		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
-		expect(settings.get("providers.webSearch")).toBe(lastOption.value);
+		expect(settings.get("providers.webSearch")).toBe("xai");
 	});
 });
 

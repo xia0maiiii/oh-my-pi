@@ -43,12 +43,14 @@
  */
 
 import { registerCustomApi } from "../api-registry";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
 	Model,
 	SimpleStreamOptions,
+	StopDetails,
 	StopReason,
 	TextContent,
 	ThinkingContent,
@@ -81,6 +83,10 @@ export interface MockResponse {
 	content?: ReadonlyArray<MockContent>;
 	/** Stop reason. Defaults to `"toolUse"` when content has tool calls, else `"stop"`. */
 	stopReason?: StopReason;
+	/** Structured terminal stop classification, e.g. Anthropic refusal metadata. */
+	stopDetails?: StopDetails | null;
+	/** Error text paired with an explicit `"error"` stop reason. */
+	errorMessage?: string;
 	/** Usage stats. Missing fields default to 0; missing `cost.total` is recomputed from components. */
 	usage?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Usage["cost"]> };
 	/** Pre-set responseId. */
@@ -237,7 +243,7 @@ export function streamMock(
 	if (!isMockModel(model)) {
 		queueMicrotask(() => {
 			stream.fail(
-				new Error(
+				new AIError.ValidationError(
 					"streamMock called with a model not produced by createMockModel(). " + "Pass a MockModel instance.",
 				),
 			);
@@ -283,6 +289,7 @@ async function runMock(
 	options: SimpleStreamOptions | undefined,
 ): Promise<void> {
 	const startedAt = Date.now();
+	const perfStart = performance.now();
 
 	let handler: MockHandler | undefined;
 	try {
@@ -294,7 +301,7 @@ async function runMock(
 
 	if (handler === undefined) {
 		stream.fail(
-			new Error(
+			new AIError.ValidationError(
 				`Mock model "${model.id}" received call ${model.calls.length} but no response or handler is configured.`,
 			),
 		);
@@ -333,7 +340,7 @@ async function runMock(
 		try {
 			await sleep(response.delayMs, options?.signal);
 		} catch {
-			emitTerminalError(stream, model, startedAt, "aborted", "Mock aborted during delay.");
+			emitTerminalError(stream, model, startedAt, perfStart, "aborted", "Mock aborted during delay.");
 			return;
 		}
 	}
@@ -345,7 +352,7 @@ async function runMock(
 				: response.throw instanceof Error
 					? response.throw.message
 					: String(response.throw);
-		emitTerminalError(stream, model, startedAt, "error", message);
+		emitTerminalError(stream, model, startedAt, perfStart, "error", message);
 		return;
 	}
 
@@ -389,8 +396,10 @@ async function runMock(
 	const reason: StopReason = response.stopReason ?? (hasToolCall ? ("toolUse" as StopReason) : ("stop" as StopReason));
 
 	partial.stopReason = reason;
+	partial.stopDetails = response.stopDetails;
+	partial.errorMessage = response.errorMessage;
 	partial.usage = mergeUsage(response.usage);
-	partial.duration = Date.now() - startedAt;
+	partial.duration = performance.now() - perfStart;
 
 	if (reason === "aborted" || reason === "error") {
 		stream.push({
@@ -437,10 +446,17 @@ function mergeUsage(partial?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Us
 	if (costProvided) {
 		merged.cost = { ...base.cost, ...partial.cost } as Usage["cost"];
 	}
-	// Recompute totalTokens when not explicitly provided (canonical formula matches types.ts:
-	// input + output + cacheRead + cacheWrite).
+	// Recompute totalTokens when not explicitly provided (canonical formula matches types.ts).
 	if (partial.totalTokens === undefined) {
-		merged.totalTokens = merged.input + merged.output + merged.cacheRead + merged.cacheWrite;
+		const orchestration = merged.orchestration;
+		merged.totalTokens =
+			merged.input +
+			merged.output +
+			merged.cacheRead +
+			merged.cacheWrite +
+			(orchestration?.input ?? 0) +
+			(orchestration?.output ?? 0) +
+			(orchestration?.cacheRead ?? 0);
 	}
 	// Recompute cost.total when cost components were supplied without an explicit total.
 	if (costProvided && partial.cost?.total === undefined) {
@@ -453,6 +469,7 @@ function emitTerminalError(
 	stream: AssistantMessageEventStream,
 	model: Model<Api>,
 	startedAt: number,
+	perfStart: number,
 	reason: "aborted" | "error",
 	message: string,
 ): void {
@@ -466,7 +483,7 @@ function emitTerminalError(
 		stopReason: reason as StopReason,
 		errorMessage: message,
 		timestamp: startedAt,
-		duration: Date.now() - startedAt,
+		duration: performance.now() - perfStart,
 	};
 	stream.push({ type: "start", partial: failure });
 	stream.push({ type: "error", reason, error: failure });
@@ -481,7 +498,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	const onAbort = () => {
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
-		reject(signal?.reason ?? new Error("aborted"));
+		reject(signal?.reason ?? new AIError.AbortError("aborted"));
 	};
 	const timer = setTimeout(() => {
 		signal?.removeEventListener("abort", onAbort);

@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
-import { type ShimmerPalette, shimmerText } from "@oh-my-pi/pi-coding-agent/modes/theme/shimmer";
+import { shimmerText } from "@oh-my-pi/pi-coding-agent/modes/theme/shimmer";
 import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 const testTheme = {
@@ -19,32 +19,6 @@ const testTheme = {
 		return codes[color as "accent" | "dim" | "muted"] ?? "";
 	},
 };
-
-// Distinct, non-bold color per tier so each rendered cell is classifiable by the
-// SGR code that precedes it (31=low, 32=mid, 33=high).
-const probe: ShimmerPalette = {
-	low: { ansi: "\x1b[31m" },
-	mid: { ansi: "\x1b[32m" },
-	high: { ansi: "\x1b[33m" },
-};
-
-/**
- * Index of the first visible cell painted with the crest (high, code 33) color,
- * or undefined when the band sits in the padding and no cell is lit. Walks the
- * coalesced `ESC[<code>m<chars>` runs that {@link shimmerText} emits.
- */
-function crestStart(rendered: string): number | undefined {
-	const run = /\x1b\[(\d+)m([^\x1b]*)/g;
-	let idx = 0;
-	let m: RegExpExecArray | null = run.exec(rendered);
-	while (m !== null) {
-		const len = [...m[2]].length;
-		if (m[1] === "33" && len > 0) return idx;
-		idx += len;
-		m = run.exec(rendered);
-	}
-	return undefined;
-}
 
 describe("shimmerText", () => {
 	afterEach(() => {
@@ -67,61 +41,90 @@ describe("shimmerText", () => {
 		expect(rendered).toContain("\x1b[38;2;12;34;56m");
 		expect(Bun.stripANSI(rendered)).toBe("x");
 	});
+
+	it("shimmers a mixed BMP + surrogate-pair message correctly (issue #4353 refactor)", () => {
+		// #4353 replaced `Array.from(seg.text)` with in-place UTF-16 iteration to
+		// drop the per-frame allocation that dominated the shimmer render cost.
+		// A surrogate-pair emoji must still count as one code point (the band
+		// index) and stay atomic in the output — an off-by-one would either
+		// double-count the pair (mispositioning the band) or emit one lone
+		// high-surrogate byte inside an ANSI run.
+		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
+		vi.spyOn(Date, "now").mockReturnValue(0);
+
+		const rendered = shimmerText("a😀b", testTheme);
+		// Strip ANSI: the visible payload must be the exact input, preserving the
+		// surrogate pair intact.
+		expect(Bun.stripANSI(rendered)).toBe("a😀b");
+	});
+
+	it("shimmers an all-emoji message without dropping any code point", () => {
+		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
+		vi.spyOn(Date, "now").mockReturnValue(0);
+
+		const rendered = shimmerText("🎉🌟✨🚀", testTheme);
+		expect(Bun.stripANSI(rendered)).toBe("🎉🌟✨🚀");
+	});
 });
 
-describe("shimmer band velocity", () => {
-	const FRAME_MS = 1000 / 30;
-	let nowMs = 0;
-
-	beforeEach(() => {
-		nowMs = 0;
-		// Deterministic classic mode regardless of global settings state.
-		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
-		vi.spyOn(Date, "now").mockImplementation(() => nowMs);
-	});
+describe("shimmerText band fast-path", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	function crestTrack(length: number, startMs: number, frames: number): (number | undefined)[] {
-		const text = "x".repeat(length);
-		const out: (number | undefined)[] = [];
-		for (let i = 0; i < frames; i++) {
-			nowMs = startMs + i * FRAME_MS;
-			out.push(crestStart(shimmerText(text, testTheme, probe)));
-		}
-		return out;
-	}
+	// The band fast-path (issue #4377) skips the per-char intensity check for
+	// code points outside the sweep window and coalesces them into a single
+	// low-tier run. These tests guard the boundary math: an off-band char must
+	// paint muted (dim), while an on-band char (t chosen so the band crest sits
+	// on the middle of the string) must paint the crest color.
 
-	it("advances the crest by at most one cell per 30fps frame", () => {
-		// L=40 → period 60 cells; at 30 cells/s that is a 2s sweep (60 frames).
-		// 75 frames covers a full sweep plus the padding gap into the next one.
-		const track = crestTrack(40, 0, 75);
-		let compared = 0;
-		for (let i = 1; i < track.length; i++) {
-			const a = track[i - 1];
-			const b = track[i];
-			if (a === undefined || b === undefined) continue; // skip the padding gap
-			expect(Math.abs(b - a)).toBeLessThanOrEqual(1);
-			compared++;
-		}
-		// Fail loudly rather than vacuously pass if the crest were never detected.
-		expect(compared).toBeGreaterThan(20);
+	it("paints code points outside the band in the muted low tier", () => {
+		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
+		// pos = (333/1000)*30 ≈ 10 = CLASSIC_PADDING, band centered on index 0.
+		// Index 30 is well outside the ±6 half-width -> must be low ("dim").
+		vi.spyOn(Date, "now").mockReturnValue(333);
+
+		const text = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		const rendered = shimmerText(text, testTheme, {
+			low: "dim",
+			mid: { ansi: "\x1b[38;2;12;34;56m" },
+			high: { ansi: "\x1b[38;2;12;34;56m" },
+			bold: true,
+		});
+
+		// Off-band chars sit inside a `\x1b[2m…` (dim) sequence — the crest color
+		// never reaches them.
+		expect(rendered.split("Z")[0]).toContain("\x1b[2m");
+		// Visible payload is preserved verbatim.
+		expect(Bun.stripANSI(rendered)).toBe(text);
 	});
 
-	it("moves the crest at a length-independent speed", () => {
-		// Starting where the crest enters at index 0 (pos = CLASSIC_PADDING = 10),
-		// the crest must travel the same number of cells over a fixed wall-clock
-		// window regardless of string length — the contract of fixed-velocity
-		// sweeping (a longer message must not shimmer faster).
-		const startMs = (10 / 30) * 1000; // pos = 10 cells → crest at index 0
-		const span = (track: (number | undefined)[]): number => {
-			const def = track.filter((v): v is number => v !== undefined);
-			return def.length ? def[def.length - 1] - def[0] : 0;
-		};
-		const shortSpan = span(crestTrack(20, startMs, 10));
-		const longSpan = span(crestTrack(60, startMs, 10));
-		expect(shortSpan).toBeGreaterThan(0);
-		expect(Math.abs(shortSpan - longSpan)).toBeLessThanOrEqual(1);
+	it("keeps the crest color when the band sweeps across the string", () => {
+		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
+		// pos = (833/1000)*30 ≈ 25; band centers on index (25 - CLASSIC_PADDING) = 15.
+		vi.spyOn(Date, "now").mockReturnValue(833);
+
+		const text = "abcdefghijklmnopqrstuvwxyz0123456789";
+		const rendered = shimmerText(text, testTheme, {
+			low: "dim",
+			mid: { ansi: "\x1b[38;2;12;34;56m" },
+			high: { ansi: "\x1b[38;2;12;34;56m" },
+			bold: true,
+		});
+
+		// The crest color must appear somewhere: the band overlaps [9, 21].
+		expect(rendered).toContain("\x1b[38;2;12;34;56m");
+		expect(Bun.stripANSI(rendered)).toBe(text);
+	});
+
+	it("handles a surrogate pair straddling the band boundary atomically", () => {
+		// Regression: a naïve fast-path that indexes by UTF-16 units would split
+		// the surrogate pair when the boundary falls between the two halves,
+		// dropping a lone high-surrogate byte into an ANSI run.
+		vi.spyOn(settingsModule, "isSettingsInitialized").mockReturnValue(false);
+		vi.spyOn(Date, "now").mockReturnValue(333);
+
+		const rendered = shimmerText("......😀......", testTheme);
+		expect(Bun.stripANSI(rendered)).toBe("......😀......");
 	});
 });

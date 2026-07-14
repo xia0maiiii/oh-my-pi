@@ -1,0 +1,3 @@
+{{planModePrompt}}
+
+{{agentPrompt}}

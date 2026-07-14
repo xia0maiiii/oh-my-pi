@@ -12,7 +12,9 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/task/index.ts`](../packages/coding-agent/src/task/index.ts)
 - [`src/task/commands.ts`](../packages/coding-agent/src/task/commands.ts)
 - [`src/prompts/agents/task.md`](../packages/coding-agent/src/prompts/agents/task.md)
+- [`src/prompts/agents/redteam.md`](../packages/coding-agent/src/prompts/agents/redteam.md) and the other red-team specialist definitions
 - [`src/prompts/tools/task.md`](../packages/coding-agent/src/prompts/tools/task.md)
+- [`src/prompts/tools/task-redteam.md`](../packages/coding-agent/src/prompts/tools/task-redteam.md)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/config.ts`](../packages/coding-agent/src/config.ts)
 - [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts)
@@ -39,53 +41,34 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 
 ## Bundled agents
 
-Bundled agents are embedded at build time (`src/task/agents.ts`) using text imports.
+Bundled agents are embedded at build time (`src/task/agents.ts`) using text imports and selected by `AgentMode`.
 
-`EMBEDDED_AGENT_DEFS` defines:
-
-- `explore`, `plan`, `designer`, `reviewer` from prompt files
-- `task` and `quick_task` from shared `task.md` body plus injected frontmatter
+The `coding` roster contains `task`, `sonic`, `explore`, `plan`, `designer`, `reviewer`, `librarian`, and the remaining generic specialists. The `redteam` roster appends `redteam`, `recon`, `validator`, `finding-reviewer`, `vuln-librarian`, `attack-planner`, and `report-designer`. In an unrestricted red-team session, omitting `agent` selects `redteam`; the generic `task` agent remains available by name. An explicit parent `spawns` list still selects its first allowed name as the default.
 
 Loading path:
 
-1. `loadBundledAgents()` parses embedded markdown with `parseAgent(..., "bundled", "fatal")`
-2. results are cached in-memory (`bundledAgentsCache`)
-3. `clearBundledAgentsCache()` is test-only cache reset
+1. `loadBundledAgents(agentMode)` parses the selected embedded markdown with `parseAgent(..., "bundled", "fatal")`.
+2. Results are cached in-memory per profile.
+3. `clearBundledAgentsCache()` is a test-only cache reset.
 
-Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter throws and can fail discovery entirely.
+`omp agents unpack --mode coding|redteam` exports the selected built-in roster. Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter throws and can fail discovery entirely.
 
 ## Filesystem and plugin discovery
 
-`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from multiple places before appending bundled definitions.
+`discoverAgents(cwd, home, agentMode)` (`src/task/discovery.ts`) merges agents from OMP-native roots and Claude plugin roots before appending the selected bundled definitions. Cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped — their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters both dir lists).
 
 ### Discovery inputs
-
-1. User config agent dirs from `getConfigDirs("agents", { project: false })`
-2. Nearest project agent dirs from `findAllNearestProjectConfigDirs("agents", cwd)`
-3. Claude plugin roots (`listClaudePluginRoots(home)`) with `agents/` subdirs
-4. Bundled agents (`loadBundledAgents()`)
+1. Nearest project `.omp` agents dir from `findAllNearestProjectConfigDirs("agents", cwd)` (filtered to `.omp`; first hit only)
+2. User `.omp` agents dir from `getConfigDirs("agents", { project: false })` (filtered to `.omp`; first hit only)
+3. Claude plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
+4. Profile-selected bundled agents (`loadBundledAgents(agentMode)`)
 
 ### Actual source order
 
-Source-family order comes from `getConfigDirs("", { project: false })`, which is derived from `priorityList` in `src/config.ts`:
-
-1. `.omp`
-2. `.claude`
-3. `.codex`
-4. `.gemini`
-
-For each source family, discovery order is:
-
-1. nearest project dir for that source (if found)
-2. user dir for that source
-
-After all source-family dirs, plugin `agents/` dirs are appended (project-scope plugins first, then user-scope).
-
-Bundled agents are appended last.
-
-### Important caveat: stale comments vs current code
-
-`discovery.ts` header comments still mention `.pi` and do not mention `.codex`/`.gemini`. Actual runtime order is driven by `src/config.ts` and currently uses `.omp`, `.claude`, `.codex`, `.gemini`.
+1. project `.omp/agents`
+2. user `~/.omp/agent/agents`
+3. plugin `agents/` dirs (project-scope first, then user-scope)
+4. bundled agents last
 
 ## Merge and collision rules
 
@@ -97,8 +80,7 @@ Discovery uses first-wins dedup by exact `agent.name`:
 
 Implications:
 
-- Project overrides user for same source family.
-- Higher-priority source family overrides lower (`.omp` before `.claude`, etc.).
+- Project `.omp` overrides user `.omp`.
 - Non-bundled agents override bundled agents with the same name.
 - Name matching is case-sensitive (`Task` and `task` are distinct).
 - Within one directory, markdown files are read in lexicographic filename order before dedup.
@@ -125,9 +107,9 @@ Lookup is exact-name linear search:
 
 - `getAgent(agents, name)` => `agents.find(a => a.name === name)`
 
-In synchronous task execution (`TaskTool.#executeSync`):
+In spawn execution (`TaskTool.#executeSync` → `#runSpawn`):
 
-1. agents are rediscovered at execution time (`discoverAgents(this.session.cwd)`)
+1. agents are rediscovered at execution time with the parent session's persisted profile (`discoverAgents(this.session.cwd, home, this.session.agentMode)`)
 2. requested `params.agent` is resolved through `getAgent`
 3. missing agent returns immediate tool response:
    - `Unknown agent "...". Available: ...`
@@ -135,21 +117,18 @@ In synchronous task execution (`TaskTool.#executeSync`):
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` builds the tool description from discovery results at initialization time. `#executeSync` rediscovers agents, so the runtime set can differ from what was listed in the earlier tool description if agent files changed mid-session. The async entry path still uses the initialization-time list to decide whether an agent is marked `blocking` before scheduling.
+`TaskTool.create()` builds the tool description from profile-keyed discovery results at initialization time. `#executeSync` rediscovers agents with the same persisted session profile, so the runtime set can differ from what was listed in the earlier tool description if agent files changed mid-session. The async entry path still uses the initialization-time list to decide whether an agent is marked `blocking` before scheduling.
 
 ## Structured-output guardrails and schema precedence
 
-Runtime output schema precedence in `TaskTool.execute`:
+Runtime output schema precedence in `TaskTool.#runSpawn`:
 
-1. task call `params.schema` when `task.simple` allows custom schemas
-2. agent frontmatter `output`
-3. parent session `outputSchema`
+1. agent frontmatter `output`
+2. parent session `outputSchema`
 
-(`effectiveOutputSchema = outputSchema ?? effectiveAgent.output ?? this.session.outputSchema` when custom task schemas are enabled; otherwise task-call schema is skipped.)
+(`effectiveOutputSchema = effectiveAgent.output ?? this.session.outputSchema` — the task call itself never carries a schema; ad-hoc structured workflows go through the eval bridge's `agent(prompt, schema)`.)
 
-Prompt-time guardrail text in `src/prompts/tools/task.md` warns about mismatch behavior for structured-output agents (`explore`, `reviewer`): output-format instructions in prose can conflict with built-in schema and produce `null` outputs.
-
-This is guidance, not hard runtime validation logic in `discoverAgents`.
+The model-facing prompt (`src/prompts/tools/task.md`) no longer carries the old structured-output mismatch warning; it tags read-only agents and warns against offloading reasoning to `explore`/`sonic` instead.
 
 ## Command discovery interaction
 
@@ -198,10 +177,11 @@ So deeper levels cannot spawn further tasks even if the agent definition include
 
 ## Plan mode behavior
 
-When parent plan mode is enabled, `TaskTool.execute` builds an `effectiveAgent` before launching subprocesses:
+When parent plan mode is enabled, `TaskTool.#runSpawn` builds an `effectiveAgent` before launching subprocesses:
 
 - prepends the plan-mode subagent system prompt
-- restricts tools to `read`, `search`, `find`, `lsp`, and `web_search`
+- selects the generic or red-team plan-mode subagent wrapper from the parent session profile
+- restricts tools to `read`, `search`, `find`, `lsp`, and `web_search`, plus `ast_grep`/`report_finding` when the agent's own tool list declares them (`PLAN_MODE_AGENT_TOOL_ALLOWLIST`)
 - clears child spawns
 
 The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.

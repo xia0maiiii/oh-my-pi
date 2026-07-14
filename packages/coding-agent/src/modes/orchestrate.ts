@@ -1,4 +1,6 @@
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import orchestrateNotice from "../prompts/system/orchestrate-notice.md" with { type: "text" };
+import orchestrateRedteamNotice from "../prompts/system/orchestrate-redteam-notice.md" with { type: "text" };
 import { createGradientHighlighter, type KeywordHighlighter } from "./gradient-highlight";
 import { keywordInProse } from "./markdown-prose";
 
@@ -18,7 +20,12 @@ import { keywordInProse } from "./markdown-prose";
 const ORCHESTRATE_WORD = /(?<!\S)orchestrate(?!\S)/;
 
 /** Hidden system notice appended after a user message that mentions "orchestrate". */
-export const ORCHESTRATE_NOTICE: string = orchestrateNotice.trim();
+export const ORCHESTRATE_NOTICE: string = renderOrchestrateNotice();
+
+/** Resolve the hidden orchestration notice for a session profile. */
+export function renderOrchestrateNotice(agentMode: AgentMode = DEFAULT_AGENT_MODE): string {
+	return (agentMode === "redteam" ? orchestrateRedteamNotice : orchestrateNotice).trim();
+}
 
 /**
  * Whether `text` contains the standalone keyword "orchestrate" (lowercase,

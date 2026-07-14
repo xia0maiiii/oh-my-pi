@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 beforeAll(() => {
 	initTheme();
@@ -89,5 +89,45 @@ describe("SessionSelectorComponent delete confirmation", () => {
 		expect(onDelete).toHaveBeenCalledTimes(1);
 		expect(rendered).not.toContain("Alpha");
 		expect(rendered).toContain("Beta");
+	});
+
+	it("Backspace on an empty search query triggers delete confirmation (macOS Fn+Backspace sends \\x7f)", async () => {
+		const onDelete = vi.fn(async () => true);
+		const selector = createSelector(onDelete);
+
+		// No search query typed yet — Backspace should mean "delete session",
+		// not "edit the (empty) search box".
+		selector.handleInput("\x7f");
+		expect(renderText(selector)).toContain("Delete session?");
+		expect(renderText(selector)).toContain("Alpha");
+
+		// Confirm.
+		selector.handleInput("\n");
+		await Bun.sleep(0);
+
+		expect(onDelete).toHaveBeenCalledTimes(1);
+		expect(renderText(selector)).not.toContain("Alpha");
+		expect(renderText(selector)).toContain("Beta");
+	});
+
+	it("Backspace with a non-empty search query edits the query, not the session", async () => {
+		const onDelete = vi.fn(async () => true);
+		const selector = createSelector(onDelete);
+
+		// Type a query, then Backspace — must delete a query char, NOT a session.
+		selector.handleInput("alpha");
+		const beforeBackspace = renderText(selector);
+		expect(beforeBackspace).toContain("alpha");
+
+		selector.handleInput("\x7f");
+		await Bun.sleep(0);
+
+		const afterBackspace = renderText(selector);
+		// Deletion did not fire.
+		expect(onDelete).not.toHaveBeenCalled();
+		expect(afterBackspace).not.toContain("Delete session?");
+		// The query was actually edited: "alpha" lost its trailing "a".
+		expect(afterBackspace).toContain("alph");
+		expect(afterBackspace).not.toContain("alpha");
 	});
 });

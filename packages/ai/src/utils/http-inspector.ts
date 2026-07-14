@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { extractHttpStatusFromError, getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error/flags";
 import { isCopilotTransientModelError } from "./retry.js";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -20,11 +21,35 @@ export type CapturedHttpErrorResponse = {
 	bodyJson?: unknown;
 };
 
-type ErrorWithStatus = {
-	status?: unknown;
-};
-
 const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
+
+/**
+ * Build the JSON persisted for a rejected request. Request fields stay at the
+ * top level (so existing dump parsers still read `body`); the provider's error
+ * is added under `errorResponse` so a failed request is diagnosable from the
+ * dump file rather than the request alone.
+ */
+export function buildHttp400DumpPayload(
+	dump: RawHttpRequestDump,
+	error: unknown,
+	message: string,
+): RawHttpRequestDump & { errorResponse: { status: number | undefined; message: string } } {
+	return {
+		...sanitizeDump(dump),
+		errorResponse: { status: AIError.status(error), message },
+	};
+}
+
+/** HTTP statuses whose rejected request we persist for post-hoc diagnosis: the
+ *  request-content rejections that wedge a session. 400 (bad request) and 413
+ *  (payload too large — an oversized image / snapcompact frame payload that 413s
+ *  and empties the turn). Auth (401/403), not-found (404), rate limits and 5xx
+ *  are excluded: 429/5xx are retried, so persisting them here would write one
+ *  dump per attempt. */
+export function shouldDumpRejectedRequest(error: unknown): boolean {
+	const status = AIError.status(error);
+	return status === 400 || status === 413;
+}
 
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
@@ -32,17 +57,16 @@ export async function appendRawHttpRequestDumpFor400(
 	dump: RawHttpRequestDump | undefined,
 ): Promise<string> {
 	// Never persist dumps under the test runner: providers exercise the 400 path
-	// with mocked fetch responses, which would otherwise litter the real ~/.omp logs.
-	if (!dump || isBunTestRuntime() || extractHttpStatusFromError(error) !== 400) {
+	if (!dump || isBunTestRuntime() || !shouldDumpRejectedRequest(error)) {
 		return message;
 	}
 
-	const sanitizedDump = sanitizeDump(dump);
-	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(sanitizedDump)).toString(36)}.json`;
+	const payload = buildHttp400DumpPayload(dump, error, message);
+	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(payload)).toString(36)}.json`;
 	const filePath = path.join(getLogsDir(), "http-400-requests", fileName);
 
 	try {
-		await Bun.write(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`);
+		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
 		return `${message}\nraw-http-request=${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
@@ -67,12 +91,6 @@ export async function finalizeErrorMessage(
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 
-export function withHttpStatus(error: unknown, status: number): Error {
-	const wrapped = error instanceof Error ? error : new Error(String(error));
-	(wrapped as ErrorWithStatus).status = status;
-	return wrapped;
-}
-
 /**
  * Rewrite error message for GitHub Copilot request failures.
  * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
@@ -87,7 +105,7 @@ export function withHttpStatus(error: unknown, status: number): Error {
  */
 export function rewriteCopilotError(errorMessage: string, error: unknown, provider: string): string {
 	if (provider !== "github-copilot") return errorMessage;
-	const status = extractHttpStatusFromError(error);
+	const status = AIError.status(error);
 	if (status === 401) {
 		return `GitHub Copilot authentication failed (HTTP 401). Your token may have been revoked. Please re-login with /login github-copilot`;
 	}

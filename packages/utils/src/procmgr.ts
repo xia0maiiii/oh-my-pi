@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
-import { $env, filterProcessEnv } from "./env";
+import { $env, filterChildShellEnv } from "./env";
 import { $which } from "./which";
 
 export interface ShellConfig {
@@ -16,7 +16,7 @@ let cachedShellConfig: ShellConfig | null = null;
 /**
  * Check if a shell binary is executable.
  */
-function isExecutable(path: string): boolean {
+export function isExecutable(path: string): boolean {
 	try {
 		fs.accessSync(path, fs.constants.X_OK);
 		return true;
@@ -31,7 +31,7 @@ function isExecutable(path: string): boolean {
 function buildSpawnEnv(shell: string): Record<string, string> {
 	const noCI = $env.PI_BASH_NO_CI || $env.CLAUDE_BASH_NO_CI;
 	return {
-		...filterProcessEnv(Bun.env),
+		...filterChildShellEnv(Bun.env),
 		SHELL: shell,
 		GIT_EDITOR: "true",
 		GPG_TTY: "not a tty",

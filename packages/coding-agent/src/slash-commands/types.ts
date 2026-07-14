@@ -14,11 +14,16 @@ export interface SubcommandDef {
 /** Declarative builtin slash command metadata used by autocomplete and help UI. */
 export interface BuiltinSlashCommand {
 	name: string;
+	aliases?: string[];
 	description: string;
+	/** Whether the command consumes text after the command name. */
+	allowArgs?: boolean;
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
 	subcommands?: SubcommandDef[];
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
+	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
+	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
 }
 
 /** Parsed slash-command text after stripping the leading "/". */
@@ -82,7 +87,6 @@ export interface TuiSlashCommandRuntime {
 
 /** Unified slash-command spec consumed by both TUI and ACP dispatchers. */
 export interface SlashCommandSpec extends BuiltinSlashCommand {
-	aliases?: string[];
 	/** When false, the dispatcher refuses to handle invocations that include arguments. */
 	allowArgs?: boolean;
 	/**

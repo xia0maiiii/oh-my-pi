@@ -1,6 +1,8 @@
+import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
+import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -9,6 +11,8 @@ import { ScrollView } from "./scroll-view";
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;
 const MIN_DESCRIPTION_WIDTH = 10;
+
+const DEFAULT_CURSOR_SYMBOL = ">";
 
 function sanitizeSingleLine(text: string): string {
 	return replaceTabs(text)
@@ -34,6 +38,8 @@ export interface SelectListTheme {
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
 	symbols: SymbolTheme;
+	/** Hover band applied to the full row under the mouse pointer. */
+	hovered?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -77,10 +83,13 @@ type SelectItemLayout =
 			spacing: "";
 	  };
 
-export class SelectList implements Component {
+export class SelectList implements Component, MouseRoutable {
 	#filteredItems: ReadonlyArray<SelectItem>;
 	#filterQuery = "";
 	#selectedIndex: number = 0;
+	#hoveredIndex: number | null = null;
+	/** Per-render map of 0-based output line → filtered-item index. */
+	#hitRows: (number | undefined)[] = [];
 
 	onSelect?: (item: SelectItem) => void;
 	onCancel?: () => void;
@@ -103,12 +112,47 @@ export class SelectList implements Component {
 		this.#selectedIndex = Math.max(0, Math.min(index, this.#filteredItems.length - 1));
 	}
 
+	/** Resolve a 0-based rendered-line index to a filtered-item index. */
+	hitTest(line: number): number | undefined {
+		return this.#hitRows[line];
+	}
+
+	/** Highlight the item under the pointer (null clears). */
+	setHoverIndex(index: number | null): void {
+		this.#hoveredIndex = index;
+	}
+
+	/** Move the selection one step for a wheel notch. */
+	handleWheel(delta: -1 | 1): void {
+		if (this.#filteredItems.length === 0) return;
+		const next = clamp(this.#selectedIndex + delta, 0, this.#filteredItems.length - 1);
+		if (next === this.#selectedIndex) return;
+		this.#selectedIndex = next;
+		this.#notifySelectionChange();
+	}
+
+	/** Mouse click: select the item under the pointer and confirm it. */
+	clickItem(index: number): void {
+		const item = this.#filteredItems[index];
+		if (!item) return;
+		if (index !== this.#selectedIndex) {
+			this.#selectedIndex = index;
+			this.#notifySelectionChange();
+		}
+		this.onSelect?.(item);
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		routeSelectListMouse(this, event, line);
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+		this.#hitRows = [];
 		const showSearchStatus = this.#shouldRenderSearchStatus();
 
 		// If no items match filter, show message
@@ -159,10 +203,12 @@ export class SelectList implements Component {
 		for (let i = startIndex; i < endIndex && rows.length < visualBudget; i++) {
 			const item = this.#filteredItems[i];
 			if (!item) continue;
+			const hovered = this.theme.hovered !== undefined && i === this.#hoveredIndex && i !== this.#selectedIndex;
 			const itemRows = this.#renderItem(item, i === this.#selectedIndex, rowWidth, primaryColumnWidth);
 			for (const row of itemRows) {
 				if (rows.length >= visualBudget) break;
-				rows.push(row);
+				this.#hitRows[rows.length] = i;
+				rows.push(hovered && this.theme.hovered ? this.theme.hovered(row) : row);
 			}
 		}
 
@@ -328,9 +374,8 @@ export class SelectList implements Component {
 		width: number,
 		primaryColumnWidth: number,
 	): SelectItemLayout {
-		const prefix = isSelected
-			? `${this.theme.symbols.cursor} `
-			: padding(visibleWidth(this.theme.symbols.cursor) + 1);
+		const cursor = this.theme.symbols?.cursor ?? DEFAULT_CURSOR_SYMBOL;
+		const prefix = isSelected ? `${cursor} ` : padding(visibleWidth(cursor) + 1);
 		const prefixWidth = visibleWidth(prefix);
 		const descriptionSingleLine = item.description ? sanitizeSingleLine(item.description) : undefined;
 
@@ -444,9 +489,18 @@ export class SelectList implements Component {
 
 	#setFilter(filter: string, notify: boolean): void {
 		this.#filterQuery = filter;
-		this.#filteredItems = filter.trim()
-			? fuzzyFilter([...this.items], filter, item => this.#getFilterText(item))
-			: this.items;
+		if (filter.trim()) {
+			// Breadcrumb the fuzzy match so the loop watchdog can attribute a
+			// large-list filter stall instead of logging it as "unknown".
+			pushLoopPhase("ui.select-filter");
+			try {
+				this.#filteredItems = fuzzyFilter([...this.items], filter, item => this.#getFilterText(item));
+			} finally {
+				popLoopPhase();
+			}
+		} else {
+			this.#filteredItems = this.items;
+		}
 		this.#selectedIndex = 0;
 		if (notify) {
 			this.#notifySelectionChange();

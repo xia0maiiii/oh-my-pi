@@ -4,23 +4,23 @@
  * Handles `omp q`/`omp web-search` subcommands for testing web search providers.
  */
 
-import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
-import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
 import { renderSearchResult } from "../web/search/render";
-import type { SearchProviderId } from "../web/search/types";
 
 export interface SearchCommandArgs {
 	query: string;
-	provider?: SearchProviderId | "auto";
+	provider?: "auto" | "xai";
 	recency?: "day" | "week" | "month" | "year";
 	limit?: number;
 	expanded: boolean;
 }
 
-const PROVIDERS: Array<SearchProviderId | "auto"> = ["auto", ...SEARCH_PROVIDER_ORDER];
+const PROVIDERS: NonNullable<SearchCommandArgs["provider"]>[] = ["auto", "xai"];
 
 const RECENCY_OPTIONS: SearchCommandArgs["recency"][] = ["day", "week", "month", "year"];
 
@@ -85,6 +85,9 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
+	const settings = await Settings.init({ cwd: getProjectDir() });
+	applyProviderGlobalsFromSettings(settings);
+
 	await initTheme();
 
 	const params: SearchQueryParams = {
@@ -109,7 +112,7 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 }
 
 export function printSearchHelp(): void {
-	process.stdout.write(`${chalk.bold(`${APP_NAME} q`)} - Test web search providers
+	process.stdout.write(`${chalk.bold(`${APP_NAME} q`)} - Search the web through xAI Grok OAuth
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} q [options] <query>
@@ -120,13 +123,13 @@ ${chalk.bold("Arguments:")}
 
 ${chalk.bold("Options:")}
   --provider <name>   Provider: ${PROVIDERS.join(", ")}
-  --recency <value>   Recency filter (Brave/Perplexity): ${RECENCY_OPTIONS.join(", ")}
+  --recency <value>   Recency filter (when supported): ${RECENCY_OPTIONS.join(", ")}
   -l, --limit <n>     Max results to return
   --compact           Render condensed output
   -h, --help          Show this help
 
 ${chalk.bold("Examples:")}
-  ${APP_NAME} q --provider=exa "what's the color of the sky"
-  ${APP_NAME} q --provider=brave --recency=week "latest TypeScript 5.7 changes"
+  ${APP_NAME} q "what's the color of the sky"
+  ${APP_NAME} q --provider=xai --recency=week "latest TypeScript changes"
 `);
 }

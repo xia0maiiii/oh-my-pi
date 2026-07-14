@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { GoalModeState } from "../../goals/state";
-import type { UsageStatistics } from "../../session/session-manager";
+import type { UsageStatistics } from "../../session/session-entries";
 import type { ToolSession } from "../../tools";
 import { runEvalBudget } from "../budget-bridge";
 
@@ -23,7 +23,18 @@ function goalState(extra: Partial<GoalModeState["goal"]>): GoalModeState {
 }
 
 function usage(output: number): UsageStatistics {
-	return { input: 0, output, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
+	return {
+		input: 0,
+		output,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: output,
+		orchestrationInput: 0,
+		orchestrationOutput: 0,
+		orchestrationCacheRead: 0,
+		premiumRequests: 0,
+		cost: 0,
+	};
 }
 
 describe("runEvalBudget", () => {

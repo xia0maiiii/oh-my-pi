@@ -3,126 +3,47 @@
  */
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
+import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { formatTitleUserMessage, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
+const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
-export const TITLE_LOCAL_FALLBACK_DELAY_MS = 10_000;
-const TITLE_MAX_TOKENS = 30;
-const REASONING_SAFE_MAX_TOKENS = 1024;
-const SET_TITLE_TOOL_NAME = "set_title";
+// Cover the "backend ignores `disableReasoning`" case unconditionally: the
+// static `model.reasoning` catalog flag can't distinguish a thinking model that
+// was declared with `reasoning: false` (e.g. Qwen3 served locally via llama.cpp,
+// whose bundled jinja chat template forces `enable_thinking: true`) from one
+// that never emits thinking. `maxTokens` is a hard cap, not a target — the
+// happy-path completion still returns in a handful of tokens, so raising the
+// ceiling costs nothing when thinking is genuinely suppressed and keeps the
+// `<title>` marker output reachable when it isn't (issue #4355).
+const TITLE_MAX_TOKENS = 1024;
 
-const setTitleTool: Tool = {
-	name: SET_TITLE_TOOL_NAME,
-	description: "Set the generated session title.",
-	parameters: {
-		type: "object",
-		properties: {
-			title: {
-				type: "string",
-				description:
-					'A concise, sentence-case 3-7 word title for the session (capitalize only the first word and proper nouns), or exactly "none" when the message carries no concrete task yet (greeting, small talk, vague).',
-			},
-		},
-		required: ["title"],
-		additionalProperties: false,
-	},
-};
+/** Matches the title the model wraps in `<title>...</title>`. */
+const TITLE_MARKER_RE = /<title>([\s\S]*?)<\/title>/i;
 
 function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["commit", "smol"], settings, availableModels, registry)?.model;
+	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels)?.model;
 	if (titleModel) return titleModel;
 
 	if (currentModel) return currentModel;
 
 	return undefined;
-}
-
-export async function raceFirstNonNull<T>(
-	primary: Promise<T | null>,
-	startFallback: () => Promise<T | null>,
-	delayMs: number = TITLE_LOCAL_FALLBACK_DELAY_MS,
-	onPrimaryWinAfterFallback?: () => void,
-): Promise<T | null> {
-	const { promise, resolve } = Promise.withResolvers<T | null>();
-	let resolved = false;
-	let primarySettled = false;
-	let fallbackStarted = false;
-	let fallbackSettled = false;
-
-	const resolveOnce = (value: T | null): void => {
-		if (resolved) return;
-		resolved = true;
-		resolve(value);
-	};
-	const maybeResolveNull = (): void => {
-		if (primarySettled && fallbackStarted && fallbackSettled) resolveOnce(null);
-	};
-	const startFallbackOnce = (): void => {
-		if (fallbackStarted || resolved) return;
-		fallbackStarted = true;
-		let fallback: Promise<T | null>;
-		try {
-			fallback = startFallback();
-		} catch {
-			fallbackSettled = true;
-			maybeResolveNull();
-			return;
-		}
-		void fallback.then(
-			value => {
-				fallbackSettled = true;
-				if (value !== null) resolveOnce(value);
-				else maybeResolveNull();
-			},
-			() => {
-				fallbackSettled = true;
-				maybeResolveNull();
-			},
-		);
-	};
-
-	const timer = setTimeout(startFallbackOnce, delayMs);
-	void primary.then(
-		value => {
-			primarySettled = true;
-			clearTimeout(timer);
-			if (value !== null) {
-				if (fallbackStarted) onPrimaryWinAfterFallback?.();
-				resolveOnce(value);
-				return;
-			}
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-		() => {
-			primarySettled = true;
-			clearTimeout(timer);
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-	);
-
-	try {
-		return await promise;
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 /**
@@ -137,6 +58,7 @@ export async function raceFirstNonNull<T>(
  *   to produce request metadata (e.g. user_id for session attribution). Using a
  *   resolver instead of a pre-evaluated value ensures the metadata's account_uuid
  *   reflects the credential actually selected for this request.
+ * @param customSystemPrompt Optional title-specific system prompt override
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -145,6 +67,7 @@ export async function generateSessionTitle(
 	sessionId?: string,
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+	customSystemPrompt?: string,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -155,37 +78,56 @@ export async function generateSessionTitle(
 		return null;
 	}
 
+	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	const tinyModel = settings.get("providers.tinyModel");
 	if (tinyModel === ONLINE_TINY_TITLE_MODEL_KEY) {
-		return generateTitleOnline(firstMessage, registry, settings, sessionId, currentModel, metadataResolver);
-	}
-
-	const onlineAbortController = new AbortController();
-	const localTitle = tinyTitleClient.generate(tinyModel, firstMessage).then(
-		title => title || null,
-		err => {
-			logger.warn("title-generator: local model error", {
-				sessionId,
-				model: tinyModel,
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return null;
-		},
-	);
-	const startOnline = (): Promise<string | null> =>
-		generateTitleOnline(
+		return generateTitleOnline(
 			firstMessage,
 			registry,
 			settings,
 			sessionId,
 			currentModel,
 			metadataResolver,
-			onlineAbortController.signal,
+			undefined,
+			titleSystemPrompt,
 		);
+	}
 
-	return raceFirstNonNull(localTitle, startOnline, TITLE_LOCAL_FALLBACK_DELAY_MS, () => {
-		onlineAbortController.abort();
-	});
+	// User explicitly picked a local tiny model. NEVER fall back to the online
+	// smol path (issue #3187): the smol role resolves through priority.json and
+	// silently bills whatever provider holds the resolved API key — OpenRouter
+	// in the reporter's case, leaking real credits without consent. If the
+	// local worker fails (unknown key, download missing, transformers.js
+	// crash, abort), leave the session untitled; the next user turn retries.
+	if (!isTinyTitleLocalModelKey(tinyModel)) {
+		logger.warn("title-generator: unknown local tiny model; skipping title (will not fall back to online)", {
+			sessionId,
+			model: tinyModel,
+			reason: "unknown-local-model",
+		});
+		return null;
+	}
+	try {
+		const localTitle = titleSystemPrompt
+			? await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
+			: await tinyTitleClient.generate(tinyModel, firstMessage);
+		if (!localTitle) {
+			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
+				sessionId,
+				model: tinyModel,
+				reason: "local-no-output",
+			});
+			return null;
+		}
+		return localTitle;
+	} catch (err) {
+		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
+			sessionId,
+			model: tinyModel,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return null;
+	}
 }
 
 export async function generateTitleOnline(
@@ -196,6 +138,7 @@ export async function generateTitleOnline(
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
+	customSystemPrompt?: string,
 ): Promise<string | null> {
 	const model = getTitleModel(registry, settings, currentModel);
 	if (!model) {
@@ -203,6 +146,13 @@ export async function generateTitleOnline(
 		return null;
 	}
 
+	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
+	// The model is always asked to wrap the title in `<title>...</title>` and
+	// the title is parsed from text. A forced `set_title` tool call was the old
+	// scheme, but hosts that ignore or reject forced `tool_choice` then echoed
+	// the prompt's `{"title": ...}` JSON example verbatim as the session title;
+	// markers work uniformly everywhere.
+	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
 	const userMessage = formatTitleUserMessage(firstMessage);
 	const modelName = `${model.provider}/${model.id}`;
 	const modelContext = {
@@ -224,25 +174,21 @@ export async function generateTitleOnline(
 		// account_uuid rather than the snapshot-at-call-site value.
 		const metadata = metadataResolver?.(model.provider);
 
-		// Title generation is a 3-7 word task, but some reasoning backends ignore
-		// disableReasoning. Keep the normal cheap budget for non-reasoning models
-		// while reserving enough output room for reasoning models to still emit
-		// the forced tool call after any unavoidable thinking tokens.
-		const maxTokens = model.reasoning ? Math.max(TITLE_MAX_TOKENS, REASONING_SAFE_MAX_TOKENS) : TITLE_MAX_TOKENS;
+		// Title generation is a 3-7 word task, but the ceiling has to survive
+		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
+		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
 		const response = await completeSimple(
 			model,
 			{
-				systemPrompt: [TITLE_SYSTEM_PROMPT],
+				systemPrompt,
 				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-				tools: [setTitleTool],
 			},
 			{
-				apiKey: registry.resolver(model.provider, { sessionId, baseUrl: model.baseUrl }),
+				apiKey: registry.resolver(model, sessionId),
 				maxTokens,
 				disableReasoning: true,
-				toolChoice: { type: "tool", name: SET_TITLE_TOOL_NAME },
 				metadata,
 				signal,
 			},
@@ -258,7 +204,7 @@ export async function generateTitleOnline(
 			return null;
 		}
 
-		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content));
+		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
 
 		if (!title) {
 			logger.debug("title-generator: no title returned", {
@@ -291,16 +237,44 @@ export async function generateTitleOnline(
 function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {
 	let textTitle = "";
 	for (const content of contentBlocks) {
-		if (content.type === "toolCall" && content.name === SET_TITLE_TOOL_NAME) {
-			const args = content.arguments as Record<string, unknown>;
-			const title = args.title;
-			return typeof title === "string" ? title.trim() : "";
-		}
 		if (content.type === "text") {
 			textTitle += content.text;
 		}
 	}
-	return textTitle.trim();
+	// Stay lenient: prefer the marker when the model closed it, otherwise
+	// accept a plain sentence after stripping any stray/unclosed tag fragment
+	// (e.g. output truncated before the closing tag).
+	const marker = TITLE_MARKER_RE.exec(textTitle);
+	const candidate = marker ? marker[1].trim() : textTitle.replace(/<\/?title>/gi, "").trim();
+	return unwrapJsonTitle(candidate);
+}
+
+/**
+ * Unwrap a JSON-shaped response (`{"title": "..."}`, optionally code-fenced)
+ * into the bare title. Models occasionally emit the structured shape they were
+ * trained on for title tasks instead of plain text; without this the raw JSON
+ * became the session title.
+ */
+function unwrapJsonTitle(candidate: string): string {
+	const text = candidate
+		.replace(/^```(?:json)?\s*/i, "")
+		.replace(/```$/, "")
+		.trim();
+	if (!text.startsWith("{")) return candidate;
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (parsed && typeof parsed === "object" && "title" in parsed && typeof parsed.title === "string") {
+			return parsed.title.trim();
+		}
+	} catch {
+		// Truncated/malformed JSON: salvage the quoted title value if present.
+		const quoted = /"title"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text);
+		if (quoted) {
+			const salvaged: unknown = JSON.parse(quoted[1]);
+			if (typeof salvaged === "string") return salvaged.trim();
+		}
+	}
+	return candidate;
 }
 
 /**
@@ -329,7 +303,7 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Set the terminal title using OSC 0 (sets both tab and window title). Unsupported terminals ignore it.
  */
 export function setTerminalTitle(title: string): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
 }
 
@@ -341,7 +315,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * Save the current terminal title on terminals that support xterm window ops.
  */
 export function pushTerminalTitle(): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write("\x1b[22;2t");
 }
 
@@ -349,6 +323,6 @@ export function pushTerminalTitle(): void {
  * Restore the previously saved terminal title on terminals that support xterm window ops.
  */
 export function popTerminalTitle(): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write("\x1b[23;2t");
 }

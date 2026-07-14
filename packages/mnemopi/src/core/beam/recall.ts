@@ -2,7 +2,7 @@ import { normalizedRecallWeights, temporalHalflifeHours } from "../../config";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { adjustWeights, classifyIntent } from "../query-intent";
-import { getSynonyms, normalizeQuery } from "../synonyms";
+import { getSynonyms, normalizeQuery, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
@@ -69,6 +69,34 @@ const VERACITY_WEIGHTS: Record<string, number> = {
 	false: 0,
 };
 
+/**
+ * Default per-result content preview cap enforced by {@link recall}. Content
+ * longer than this is clipped and the last character replaced with `…` so
+ * callers see the truncation; the full row remains reachable via
+ * `Mnemopi.get()` (and, in the coding-agent, `memory://<id>`). Overridable per
+ * call via {@link RecallOptions.contentPreviewChars}.
+ */
+export const RECALL_CONTENT_PREVIEW_CHARS = 500;
+
+/**
+ * Clip `content` to at most `limit` characters, replacing the tail with `…`
+ * when truncated so agents can distinguish a preview from a full row. Returns
+ * the original string (and `truncated: false`) when the limit is 0/negative or
+ * the content already fits. The single `…` occupies one character of the cap,
+ * so a 500-char cap yields at most 499 real characters plus the marker.
+ */
+export function clipRecallContent(
+	content: string,
+	limit: number = RECALL_CONTENT_PREVIEW_CHARS,
+): { content: string; truncated: boolean; fullLength: number } {
+	const fullLength = content.length;
+	if (limit <= 0 || fullLength <= limit) {
+		return { content, truncated: false, fullLength };
+	}
+	const head = content.slice(0, Math.max(0, limit - 1));
+	return { content: `${head}…`, truncated: true, fullLength };
+}
+
 const DEFAULT_LIMIT = 500;
 const STOP_WORDS = new Set([
 	"a",
@@ -100,6 +128,32 @@ const STOP_WORDS = new Set([
 	"who",
 	"with",
 ]);
+
+const FACT_QUERY_FILLER_WORDS = new Set([
+	...QUERY_STOP_WORDS,
+	"active",
+	"current",
+	"currently",
+	"d",
+	"know",
+	"latest",
+	"ll",
+	"m",
+	"please",
+	"present",
+	"re",
+	"recent",
+	"remind",
+	"remember",
+	"s",
+	"t",
+	"tell",
+	"today",
+	"ve",
+]);
+
+const FACT_CLITIC_FRAGMENTS = new Set(["d", "ll", "m", "re", "s", "t", "ve"]);
+const FLAT_FACT_SEARCH_NOISE: Record<string, true> = { entity: true, fact: true };
 
 function nowIso(): string {
 	return new Date().toISOString();
@@ -174,6 +228,35 @@ function expandedTokenGroups(query: string, useSynonyms = true): string[][] {
 		if (seen.size > 0) groups.push([...seen]);
 	}
 	return groups;
+}
+
+function factExpandedTokenGroups(query: string, content: string): string[][] {
+	const contentLower = content.toLowerCase();
+	const contentTokens = new Set(tokenize(contentLower));
+	const groups: string[][] = [];
+	for (const token of tokenize(query)) {
+		if (FACT_QUERY_FILLER_WORDS.has(token) && (FACT_CLITIC_FRAGMENTS.has(token) || !contentTokens.has(token))) {
+			continue;
+		}
+		const seen = new Set<string>();
+		for (const variant of recallSynonyms(token, true)) {
+			for (const part of tokenize(variant)) {
+				if (!FACT_QUERY_FILLER_WORDS.has(part) || (!FACT_CLITIC_FRAGMENTS.has(part) && contentTokens.has(part))) {
+					seen.add(part);
+				}
+			}
+		}
+		if (seen.size > 0) groups.push([...seen]);
+	}
+	return groups;
+}
+
+function tokensFromGroups(groups: readonly (readonly string[])[]): string[] {
+	const seen = new Set<string>();
+	for (const group of groups) {
+		for (const token of group) seen.add(token);
+	}
+	return [...seen];
 }
 
 function contentMatchesToken(contentLower: string, contentTokens: ReadonlySet<string>, token: string): boolean {
@@ -453,6 +536,8 @@ function buildWhere(
 
 const MEMORY_COLUMNS =
 	"id, content, source, timestamp, session_id, importance, metadata_json, veracity, memory_type, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, event_date, event_date_precision, temporal_tags";
+const WORKING_MEMORY_COLUMNS =
+	"id, content, embed_text, source, timestamp, session_id, importance, metadata_json, veracity, memory_type, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, event_date, event_date_precision, temporal_tags";
 const EPISODIC_COLUMNS = `${MEMORY_COLUMNS}, rowid, summary_of, tier`;
 
 function ftsRows(
@@ -570,7 +655,7 @@ function fetchCandidates(
 	if (idsOrRowids.length === 0) return [];
 	const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
 	const keyColumn = tierLabel === "working" ? "id" : "rowid";
-	const columns = tierLabel === "working" ? MEMORY_COLUMNS : EPISODIC_COLUMNS;
+	const columns = tierLabel === "working" ? WORKING_MEMORY_COLUMNS : EPISODIC_COLUMNS;
 	const { where, params } = buildWhere(beam, "m", options);
 	const rows = queryAll(
 		beam,
@@ -608,7 +693,7 @@ function fallbackCandidates(
 	options: RecallOptionsInternal,
 ): MemoryCandidate[] {
 	const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
-	const columns = tierLabel === "working" ? MEMORY_COLUMNS : EPISODIC_COLUMNS;
+	const columns = tierLabel === "working" ? WORKING_MEMORY_COLUMNS : EPISODIC_COLUMNS;
 	const { where, params } = buildWhere(beam, "", options);
 	const rows = queryAll(beam, `SELECT ${columns} FROM ${table} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
 		...params,
@@ -630,10 +715,11 @@ function scoreCandidate(
 	options: RecallOptionsInternal,
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
+	const searchableContent = asString(candidate.row.embed_text) || content;
 	const lexical =
 		queryGroups.length > 0
-			? lexicalGroupRelevance(queryGroups, content, normalizedQueryLower)
-			: lexicalRelevance(queryTokens, content, normalizedQueryLower);
+			? lexicalGroupRelevance(queryGroups, searchableContent, normalizedQueryLower)
+			: lexicalRelevance(queryTokens, searchableContent, normalizedQueryLower);
 	const minRel = minimumRelevance(queryTokens);
 	if (lexical < minRel && candidate.signals.dense < 0.65) return null;
 	const [vecWeight, ftsWeight, importanceWeight] = weights;
@@ -678,11 +764,12 @@ function scoreCandidate(
 		const tierWeight = degradationTier === 1 ? 1 : degradationTier === 2 ? 0.85 : 0.7;
 		score *= tierWeight;
 	}
-	score *= veracityWeight * currentContentAdjustment(content, options.currentSensitive === true);
+	score *= veracityWeight * currentContentAdjustment(searchableContent, options.currentSensitive === true);
+	const preview = clipRecallContent(content, options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS);
 	const result: RecallResult = {
 		...candidate.row,
 		id: asString(candidate.row.id),
-		content: content.slice(0, 500),
+		content: preview.content,
 		source: asNullableString(candidate.row.source),
 		timestamp: asNullableString(candidate.row.timestamp),
 		importance,
@@ -708,6 +795,8 @@ function scoreCandidate(
 			recency_decay: round4(decay),
 			temporal: round4(temporalScore),
 		},
+		truncated: preview.truncated,
+		full_length: preview.fullLength,
 	};
 	return result;
 }
@@ -962,7 +1051,7 @@ export async function recallEnhanced(
 		updateRecallCounts: false,
 	});
 	if (options.includeFacts === true) {
-		const facts = factRecall(beam, query, Math.min(3, topK));
+		const facts = factRecall(beam, query, factRecallLimit(topK));
 		results.push(...facts);
 	}
 	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
@@ -971,20 +1060,36 @@ export async function recallEnhanced(
 	return finalResults;
 }
 
+function factRecallLimit(topK: number): number {
+	const requested = Math.max(0, Math.floor(topK));
+	if (requested === 0) return 0;
+	return Math.min(requested, Math.max(3, Math.ceil(requested / 2)));
+}
+
 function sandwichOrder(results: readonly RecallResult[]): {
 	high: RecallResult[];
 	medium: RecallResult[];
 	closing: RecallResult[];
 } {
 	const scored = [...results].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	const high = scored.filter(r => (r.score ?? 0) > 0.7).slice(0, 3);
-	const medium = scored.filter(r => (r.score ?? 0) > 0.3 && (r.score ?? 0) <= 0.7).slice(0, 5);
-	const closing = scored.filter(r => !high.includes(r)).slice(0, 3);
-	return { high, medium, closing: closing.length > 0 ? closing : high.slice(0, 2) };
+	const highLimit = scored.length > 0 && scored.length < 4 ? 1 : 3;
+	const high = scored.slice(0, highLimit);
+	const medium = scored.slice(high.length, high.length + 5);
+	const closing = scored.slice(high.length + medium.length, high.length + medium.length + 3);
+	return { high, medium, closing };
+}
+function factSearchableText(subject: string, predicate: string, object: string): string {
+	const objectText = object.trim();
+	if (objectText.length === 0) return `${subject} ${predicate}`.trim();
+	const structuralParts = [subject, predicate].filter(part => {
+		const token = part.trim().toLowerCase();
+		return token.length > 0 && FLAT_FACT_SEARCH_NOISE[token] !== true;
+	});
+	return [...structuralParts, objectText].join(" ").trim();
 }
 
 function factLine(result: RecallResult): string {
-	const content = result.content.slice(0, 200).trim();
+	const content = clipRecallContent(result.content.trim(), 200).content;
 	const ts = typeof result.timestamp === "string" && result.timestamp.length > 0 ? result.timestamp.slice(0, 10) : "?";
 	const source = result.source ?? "unknown";
 	const score = result.score ?? result.importance ?? 0;
@@ -1062,13 +1167,11 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 		}
 	}
 	if (matched.length === 0) return [];
-	const rowids = matched
-		.slice(0, topK)
-		.map(row => asNumber(row.rowid))
-		.filter(rowid => rowid > 0);
+	const rowids = matched.map(row => asNumber(row.rowid)).filter(rowid => rowid > 0);
 	if (rowids.length === 0) return [];
 	const visibility = factVisibilityWhere(beam, "");
 	const ranks = normalizeRanks(matched, "rowid");
+	const normalized = normalizeQuery(query).toLowerCase();
 	const rows = queryAll(
 		beam,
 		`SELECT rowid, fact_id, subject, predicate, object, timestamp, confidence
@@ -1076,25 +1179,47 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 		 WHERE rowid IN (${placeholders(rowids.length)}) AND ${visibility.where}
 		 ORDER BY confidence DESC
 		 LIMIT ?`,
-		[...rowids, ...visibility.params, topK],
+		[...rowids, ...visibility.params, rowids.length],
 	);
-	return rows.map(row => {
-		const subject = asString(row.subject);
-		const predicate = asString(row.predicate);
-		const object = asString(row.object);
-		const confidence = asNumber(row.confidence, 0.5);
-		const result: FactRecallResult = {
-			id: asString(row.fact_id),
-			content: object.length > 0 ? object : `${subject} ${predicate}`.trim(),
-			score: round4(confidence * 0.8 + (ranks.get(asNumber(row.rowid)) ?? 0) * 0.2),
-			fact_id: asString(row.fact_id),
-			subject,
-			predicate,
-			timestamp: asNullableString(row.timestamp),
-			tier_label: "fact",
-			tier: "fact",
-			source: "facts",
-		};
-		return result;
-	});
+	return rows
+		.map(row => {
+			const subject = asString(row.subject);
+			const predicate = asString(row.predicate);
+			const object = asString(row.object);
+			const confidence = asNumber(row.confidence, 0.5);
+			const content = object.length > 0 ? object : `${subject} ${predicate}`.trim();
+			const searchable = factSearchableText(subject, predicate, object);
+			const queryGroups = factExpandedTokenGroups(query, searchable);
+			const queryTokens = tokensFromGroups(queryGroups);
+			const lexical =
+				queryGroups.length > 0
+					? lexicalGroupRelevance(queryGroups, searchable, normalized)
+					: lexicalRelevance(queryTokens, searchable, normalized);
+			const rank = ranks.get(asNumber(row.rowid)) ?? 0;
+			const result: FactRecallResult = {
+				id: asString(row.fact_id),
+				content,
+				score: round4(lexical * (0.7 + confidence * 0.2 + rank * 0.1)),
+				fact_id: asString(row.fact_id),
+				subject,
+				predicate,
+				timestamp: asNullableString(row.timestamp),
+				tier_label: "fact",
+				tier: "fact",
+				source: "facts",
+				keyword_score: round4(lexical),
+				fts_score: round4(rank),
+				importance_score: round4(confidence),
+				explanation: `fact keyword=${round4(lexical)}`,
+				voice_scores: {
+					keyword: round4(lexical),
+					fts: round4(rank),
+					importance: round4(confidence),
+				},
+			};
+			return result;
+		})
+		.filter(result => (result.score ?? 0) > 0)
+		.sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+		.slice(0, topK);
 }

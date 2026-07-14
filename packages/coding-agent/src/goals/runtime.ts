@@ -1,10 +1,15 @@
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { escapeXmlText, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { type AgentMode, DEFAULT_AGENT_MODE } from "../config/agent-mode";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
+import goalModeRedteamActivePrompt from "../prompts/goals/goal-mode-redteam-active.md" with { type: "text" };
+import goalRedteamBudgetLimitPrompt from "../prompts/goals/goal-redteam-budget-limit.md" with { type: "text" };
+import goalRedteamContinuationPrompt from "../prompts/goals/goal-redteam-continuation.md" with { type: "text" };
 import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
 
 export interface GoalRuntimeHost {
+	agentMode?: AgentMode;
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
@@ -37,6 +42,18 @@ export interface GoalRuntimeSnapshot {
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
+const CODING_GOAL_PROMPTS: Record<GoalPromptKind, string> = {
+	active: goalModeActivePrompt,
+	continuation: goalContinuationPrompt,
+	"budget-limit": goalBudgetLimitPrompt,
+};
+
+const REDTEAM_GOAL_PROMPTS: Record<GoalPromptKind, string> = {
+	active: goalModeRedteamActivePrompt,
+	continuation: goalRedteamContinuationPrompt,
+	"budget-limit": goalRedteamBudgetLimitPrompt,
+};
+
 function cloneGoal(goal: Goal): Goal {
 	return { ...goal };
 }
@@ -58,28 +75,6 @@ export function remainingTokens(goal: Goal | null | undefined): number | null {
 	return Math.max(0, goal.tokenBudget - goal.tokensUsed);
 }
 
-export function escapeXmlText(input: string): string {
-	let firstEscapable = -1;
-	for (let index = 0; index < input.length; index++) {
-		const char = input.charCodeAt(index);
-		if (char === 38 || char === 60 || char === 62) {
-			firstEscapable = index;
-			break;
-		}
-	}
-	if (firstEscapable === -1) return input;
-
-	let output = input.slice(0, firstEscapable);
-	for (let index = firstEscapable; index < input.length; index++) {
-		const char = input[index];
-		if (char === "&") output += "&amp;";
-		else if (char === "<") output += "&lt;";
-		else if (char === ">") output += "&gt;";
-		else output += char;
-	}
-	return output;
-}
-
 export function renderTrustedObjective(objective: string): string {
 	return `<objective>\n${escapeXmlText(objective)}\n</objective>`;
 }
@@ -98,13 +93,8 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
-	const template =
-		kind === "active"
-			? goalModeActivePrompt
-			: kind === "continuation"
-				? goalContinuationPrompt
-				: goalBudgetLimitPrompt;
+function renderGoalPromptForMode(kind: GoalPromptKind, goal: Goal, agentMode: AgentMode = DEFAULT_AGENT_MODE): string {
+	const template = agentMode === "redteam" ? REDTEAM_GOAL_PROMPTS[kind] : CODING_GOAL_PROMPTS[kind];
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
 		tokensUsed: String(goal.tokensUsed),
@@ -112,6 +102,10 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
 	});
+}
+
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+	return renderGoalPromptForMode(kind, goal);
 }
 
 export function completionBudgetReport(goal: Goal): string | null {
@@ -200,8 +194,8 @@ export class GoalRuntime {
 		}
 	}
 
-	#markActiveAccounting(goal: Goal): void {
-		if (this.#wallClock.activeGoalId !== goal.id) {
+	#markActiveAccounting(goal: Goal, resetWallClock = false): void {
+		if (resetWallClock || this.#wallClock.activeGoalId !== goal.id) {
 			this.#wallClock = { lastAccountedAt: this.#now(), activeGoalId: goal.id };
 		}
 		if (this.#turnSnapshot) {
@@ -215,6 +209,12 @@ export class GoalRuntime {
 		if (this.#turnSnapshot) {
 			this.#turnSnapshot.activeGoalId = undefined;
 		}
+	}
+
+	clearAccounting(): void {
+		this.#turnSnapshot = undefined;
+		this.#clearActiveAccounting();
+		this.#budgetReportedFor = undefined;
 	}
 
 	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
@@ -257,7 +257,7 @@ export class GoalRuntime {
 			return;
 		}
 		await this.#withAccounting(async () => {
-			await this.#flushUsageLocked("suppressed");
+			await this.#flushUsageLocked("suppressed", undefined, options?.reason === "internal");
 			this.#turnSnapshot = undefined;
 			if (options?.reason !== "interrupted") return;
 			const cloned = this.#getStateClone();
@@ -271,9 +271,14 @@ export class GoalRuntime {
 		});
 	}
 
-	async onThreadResumed(): Promise<GoalModeState | undefined> {
+	async onThreadResumed(options?: { preserveActiveGoal?: boolean }): Promise<GoalModeState | undefined> {
 		const state = this.#getStateClone();
 		if (!state) return undefined;
+		if (options?.preserveActiveGoal && state.enabled && state.goal.status === "active") {
+			this.#markActiveAccounting(state.goal, true);
+			await this.#commitState(state, { emit: true });
+			return state;
+		}
 		if (state.goal.status === "active") {
 			state.enabled = false;
 			state.goal.status = "paused";
@@ -323,6 +328,7 @@ export class GoalRuntime {
 	async #flushUsageLocked(
 		steering: GoalBudgetSteering,
 		currentUsage: GoalTokenUsage = this.#host.getCurrentUsage(),
+		persistWallClock = false,
 	): Promise<void> {
 		const state = this.#getStateClone();
 		if (!state?.enabled || !isAccountingStatus(state.goal)) return;
@@ -355,8 +361,11 @@ export class GoalRuntime {
 		if (this.#wallClock.activeGoalId === state.goal.id && wallSeconds > 0) {
 			this.#wallClock.lastAccountedAt += wallSeconds * 1000;
 		}
-
-		await this.#commitState(state, { persist: "goal" });
+		// Persisting wall-clock-only accounting on every tool event bloats /goal sessions with full
+		// objective snapshots. Keep normal tool flushes in memory/UI only, but make wall-clock
+		// usage durable before internal session switches because the active runtime is leaving.
+		const shouldPersistUsage = tokenDelta > 0 || flippedToBudgetLimited || (persistWallClock && wallSeconds > 0);
+		await this.#commitState(state, { persist: shouldPersistUsage ? "goal" : undefined });
 
 		if (state.goal.status !== "budget-limited") {
 			this.#budgetReportedFor = undefined;
@@ -505,14 +514,14 @@ export class GoalRuntime {
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
+			? renderGoalPromptForMode("active", state.goal, this.#host.agentMode)
 			: undefined;
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPromptForMode("continuation", state.goal, this.#host.agentMode)
 			: undefined;
 	}
 
@@ -521,7 +530,7 @@ export class GoalRuntime {
 		this.#budgetReportedFor = goal.id;
 		await this.#host.sendHiddenMessage({
 			customType: "goal-budget-limit",
-			content: renderGoalPrompt("budget-limit", goal),
+			content: renderGoalPromptForMode("budget-limit", goal, this.#host.agentMode),
 			deliverAs: "steer",
 		});
 	}

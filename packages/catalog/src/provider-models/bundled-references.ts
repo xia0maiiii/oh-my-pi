@@ -1,3 +1,4 @@
+import { isZeroCostXaiOAuthReference } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
 
@@ -29,15 +30,18 @@ export function createReferenceResolver<TApi extends Api>(
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
+			if (isZeroCostXaiOAuthReference(candidate)) {
+				continue;
+			}
 			const existing = globalRefs.get(candidate.id);
 			if (!existing) {
 				globalRefs.set(candidate.id, candidate);
 			} else if (candidate.contextWindow !== existing.contextWindow) {
-				if (candidate.contextWindow > existing.contextWindow) {
+				if ((candidate.contextWindow ?? 0) > (existing.contextWindow ?? 0)) {
 					globalRefs.set(candidate.id, candidate);
 				}
 			} else if (candidate.maxTokens !== existing.maxTokens) {
-				if (candidate.maxTokens > existing.maxTokens) {
+				if ((candidate.maxTokens ?? 0) > (existing.maxTokens ?? 0)) {
 					globalRefs.set(candidate.id, candidate);
 				}
 			} else if (existing.provider !== "openai" && candidate.provider === "openai") {

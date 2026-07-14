@@ -3,11 +3,36 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { assertDocsIndexFresh, buildDocsIndexPayload } from "./generate-docs-index";
 
 const packageDir = path.join(import.meta.dir, "..");
 const outDir = path.join(packageDir, "dist");
 const cliPath = path.join(outDir, "cli.js");
 const shebang = "#!/usr/bin/env bun\n";
+
+// Native / optional / platform-specific deps that are never bundled — installed on
+// demand (transformers/fastembed/onnxruntime) or shipped as their own artifact
+// (native addon, mupdf).
+const ALWAYS_EXTERNAL = ["mupdf", "@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+
+// Heavy, lazily-used third-party leaf deps. Each is a declared `dependency`, so the
+// published package resolves it from node_modules at runtime; bundling only embeds a
+// redundant copy that bloats dist/cli.js. NEVER add a patched dependency here — the
+// bundle is where a root `patchedDependencies` patch is baked in, so an externalized
+// import would load the unpatched npm package in users' installs (currently
+// @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
+// bundled).
+const RUNTIME_EXTERNAL = [
+	"puppeteer-core",
+	"@puppeteer/browsers",
+	"@babel/parser",
+	"@xterm/headless",
+	"turndown",
+	"turndown-plugin-gfm",
+	"@mozilla/readability",
+	"linkedom",
+	"@agentclientprotocol/sdk",
+];
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
@@ -48,28 +73,51 @@ async function cleanBundleOutputs(): Promise<void> {
 	);
 }
 
+async function assertDocsEmbedPopulated(): Promise<void> {
+	// bundle-dist runs from prepack (which calls `gen:docs` first) or directly.
+	// Direct invocations must fail — the tarball ships src/, and an empty embed
+	// would make src/internal-urls/docs-index.ts fall through to the missing
+	// repo `docs/` tree at runtime in published packages (codex review, PR #3941).
+	const embedPath = path.join(packageDir, "src/internal-urls/docs-index.generated.txt");
+	const embed = await Bun.file(embedPath).text();
+	if (embed.length === 0) {
+		throw new Error(
+			"docs-index embed is empty. Run `bun run gen:docs` before `bun run gen:bundle`, or use `bun pm pack` which runs the prepack chain.",
+		);
+	}
+	const expected = await buildDocsIndexPayload();
+	assertDocsIndexFresh(embed, expected);
+}
+
 async function main(): Promise<void> {
 	const start = Bun.nanoseconds();
 	await cleanBundleOutputs();
-	await runCommand([
-		"bun",
-		"build",
-		"--target=bun",
-		"--outdir",
-		"dist",
-		"--minify-whitespace",
-		"--minify-syntax",
-		"--keep-names",
-		"--external",
-		"mupdf",
-		"--external",
-		"@oh-my-pi/pi-natives",
-		"--external",
-		"@huggingface/transformers",
-		"--define",
-		'process.env.PI_BUNDLED="true"',
-		"./src/cli.ts",
-	]);
+	await assertDocsEmbedPopulated();
+	// The npm bundle ships no stats dashboard sources, so embed the dashboard
+	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
+	// afterwards to keep the checked-in placeholder empty. The docs embed stays
+	// populated on disk — postpack owns its reset so `bun pm pack` can pack a
+	// tarball whose src copy is still valid for subpath imports.
+	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
+	try {
+		await runCommand([
+			"bun",
+			"build",
+			"--target=bun",
+			"--outdir",
+			"dist",
+			// Full minify (whitespace + syntax + identifiers); --keep-names retains
+			// fn/class .name where code depends on it.
+			"--minify",
+			"--keep-names",
+			...[...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL].flatMap(dep => ["--external", dep]),
+			"--define",
+			'process.env.PI_BUNDLED="true"',
+			"./src/cli.ts",
+		]);
+	} finally {
+		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
+	}
 	await ensureShebang();
 	const stat = await fs.stat(cliPath);
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;

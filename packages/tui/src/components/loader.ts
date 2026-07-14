@@ -57,12 +57,15 @@ export class Loader extends Text {
 		this.#intervalId = setInterval(() => {
 			const now = performance.now();
 			const elapsed = now - this.#lastSpinnerTick;
-			if (elapsed >= SPINNER_ADVANCE_MS) {
+			const shouldAdvanceSpinner = elapsed >= SPINNER_ADVANCE_MS;
+			if (shouldAdvanceSpinner) {
 				const steps = Math.floor(elapsed / SPINNER_ADVANCE_MS);
 				this.#currentFrame = (this.#currentFrame + steps) % this.#frames.length;
 				this.#lastSpinnerTick += steps * SPINNER_ADVANCE_MS;
 			}
-			this.#updateDisplay();
+			if (shouldAdvanceSpinner || this.#ui?.synchronizedOutput === true) {
+				this.#updateDisplay();
+			}
 		}, intervalMs);
 	}
 
@@ -90,7 +93,11 @@ export class Loader extends Text {
 		const frame = this.#frames[this.#currentFrame];
 		const text = `${this.spinnerColorFn(frame)} ${this.messageColorFn(this.message)}`;
 		if (this.setText(text) && this.#ui) {
-			this.#ui.requestRender();
+			// Component-scoped: a spinner tick changes only this component, so
+			// the TUI may reuse every other root subtree instead of re-walking
+			// the whole tree (full repaints at 12.5 Hz made huge transcripts
+			// lag as soon as the loader appeared).
+			this.#ui.requestComponentRender(this);
 		}
 	}
 }

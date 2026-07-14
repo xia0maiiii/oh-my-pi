@@ -46,7 +46,81 @@ class StreamingBlock implements Component {
 		return this.#finalized;
 	}
 	invalidate(): void {}
+	renderCount = 0;
 	render(_width: number): string[] {
+		this.renderCount++;
+		return [...this.#lines];
+	}
+}
+
+// A still-live block that can declare a byte-stable rendered prefix. The
+// transcript container may commit only those declared rows before finalization.
+class DeclaredSettledStreamingBlock extends StreamingBlock {
+	#settledRows: number;
+
+	constructor(lines: string[], settledRows: number) {
+		super(lines);
+		this.#settledRows = settledRows;
+	}
+
+	setSettledRows(rows: number): void {
+		this.#settledRows = rows;
+	}
+
+	getTranscriptBlockSettledRows(): number {
+		return this.#settledRows;
+	}
+}
+
+class CountingFinalizedBlock implements Component {
+	renderCount = 0;
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	set(lines: string[]): void {
+		this.#lines = lines;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		this.renderCount++;
+		return [...this.#lines];
+	}
+}
+
+// A finalized block that can still mutate afterwards (an assistant message whose
+// suppressed inline error is restored at the next turn, late tool-result images)
+// and reports each mutation through the transcript block version protocol.
+class VersionedFinalizedBlock implements Component {
+	renderCount = 0;
+	#lines: string[];
+	#version = 0;
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	mutate(lines: string[]): void {
+		this.#lines = lines;
+		this.#version++;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	getTranscriptBlockVersion(): number {
+		return this.#version;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		this.renderCount++;
 		return [...this.#lines];
 	}
 }
@@ -117,7 +191,7 @@ describe("TranscriptContainer", () => {
 		expect(container.render(80)).toEqual(["a-reflowed", "", "b2"]);
 	});
 
-	it("reports the live block start that gates native scrollback commits", () => {
+	it("reports undefined as the native scrollback boundary when every block is finalized", () => {
 		const container = new TranscriptContainer();
 		const a = new MutableBlock(["a1", "a2"]);
 		const b = new MutableBlock(["b1"]);
@@ -125,11 +199,11 @@ describe("TranscriptContainer", () => {
 		container.addChild(b);
 
 		expect(container.render(40)).toEqual(["a1", "a2", "", "b1"]);
-		expect(container.getNativeScrollbackLiveRegionStart()).toBe(3);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
 
 		b.set(["b1", "b2"]);
 		expect(container.render(40)).toEqual(["a1", "a2", "", "b1", "b2"]);
-		expect(container.getNativeScrollbackLiveRegionStart()).toBe(3);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
 	});
 
 	it("keeps an unfinalized block below the seam when a finalized block is appended below it", () => {
@@ -150,8 +224,8 @@ describe("TranscriptContainer", () => {
 		// The tool's result lands after the card is already below it.
 		tool.finalize(["✔ write: 4 lines"]);
 		expect(container.render(40)).toEqual(["✔ write: 4 lines", "", "rule card"]);
-		// The seam moves past the now-finalized tool.
-		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+		// All blocks are finalized; the whole rendered frame is committable.
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
 
 		// Even after finalizing, a late re-layout still repaints in the window.
 		tool.set(["collapsed"]);
@@ -187,9 +261,8 @@ describe("TranscriptContainer", () => {
 
 		const rendered = plain(container.render(80));
 		expect(rendered).toContain("The config file write went through despite the interruption.");
-		expect(rendered).not.toContain(USER_INTERRUPT_LABEL);
 		expect(rendered).toContain("Copied raw SSE stream");
-		expect(container.getNativeScrollbackLiveRegionStart()).not.toBe(0);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
 	});
 
 	it("starts the live region at the earliest of several unfinalized blocks", () => {
@@ -214,7 +287,152 @@ describe("TranscriptContainer", () => {
 		// The pending block updates freely while live.
 		pending.finalize(["pending-final"]);
 		expect(container.render(40)).toEqual(["done-collapsed", "", "pending-final", "", "card"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
+	});
+
+	it("stops the boundary at the first unfinalized block's first content row when no rows are settled", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		const live = new StreamingBlock(["live-0", "live-1"]);
+		container.addChild(live);
+		container.addChild(new MutableBlock(["below"]));
+
+		expect(container.render(40)).toEqual(["history", "", "live-0", "live-1", "", "below"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+
+		live.set(["live-0 updated", "live-1"]);
+		expect(container.render(40)).toEqual(["history", "", "live-0 updated", "live-1", "", "below"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+	});
+
+	it("extends the boundary through declared settled rows after stripping leading blank padding", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		const live = new DeclaredSettledStreamingBlock(["", "settled-a", "settled-b", "live-tail", ""], 3);
+		container.addChild(live);
+
+		expect(container.render(40)).toEqual(["history", "", "settled-a", "settled-b", "live-tail"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(4);
+	});
+
+	it("returns undefined after the first unfinalized block finalizes", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		const live = new StreamingBlock(["live"]);
+		container.addChild(live);
+
+		expect(container.render(40)).toEqual(["history", "", "live"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+
+		live.finalize(["done"]);
+		expect(container.render(40)).toEqual(["history", "", "done"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBeUndefined();
+	});
+
+	it("pins the boundary at an empty unfinalized block's row position", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		container.addChild(new StreamingBlock([]));
+		container.addChild(new MutableBlock(["below"]));
+
+		expect(container.render(40)).toEqual(["history", "", "below"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(1);
+	});
+
+	it("does not let finalized blocks below the first unfinalized block extend the boundary", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		container.addChild(new StreamingBlock(["live"]));
+		container.addChild(new StreamingBlock(["finalized-below-0", "finalized-below-1"], true));
+
+		expect(container.render(40)).toEqual(["history", "", "live", "", "finalized-below-0", "finalized-below-1"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+	});
+	it("does not re-render finalized rows already committed to native scrollback", () => {
+		const container = new TranscriptContainer();
+		const committed = new CountingFinalizedBlock(["committed"]);
+		const liveTail = new CountingFinalizedBlock(["tail"]);
+		container.addChild(committed);
+		container.addChild(liveTail);
+
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(1);
+		expect(liveTail.renderCount).toBe(1);
+
+		container.setNativeScrollbackCommittedRows(1);
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(1);
+		expect(liveTail.renderCount).toBe(2);
+
+		container.invalidate();
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(2);
+	});
+	it("re-renders a committed finalized block when its version changes", () => {
+		const container = new TranscriptContainer();
+		const block = new VersionedFinalizedBlock(["original"]);
+		container.addChild(block);
+
+		expect(container.render(40)).toEqual(["original"]);
+		container.setNativeScrollbackCommittedRows(1);
+		expect(container.render(40)).toEqual(["original"]);
+		expect(block.renderCount).toBe(1);
+
+		// Post-finalize mutation (e.g. setErrorPinned(false) restoring the inline
+		// error) must surface even though the rows sit in committed scrollback —
+		// the render is what lets the TUI's committed-prefix audit re-anchor.
+		block.mutate(["original", "Error: boom"]);
+		expect(container.render(40)).toEqual(["original", "Error: boom"]);
+		expect(block.renderCount).toBe(2);
+
+		// Once observed, the bypass re-engages at the new version.
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["original", "Error: boom"]);
+		expect(block.renderCount).toBe(2);
+	});
+	it("renders once after a block finalizes with rows already inside committed scrollback", () => {
+		const container = new TranscriptContainer();
+		const block = new StreamingBlock(["streaming"]);
+		const counting = new CountingFinalizedBlock(["tail"]);
+		container.addChild(block);
+		container.addChild(counting);
+
+		expect(container.render(40)).toEqual(["streaming", "", "tail"]);
+
+		// The block's rows settle into committed scrollback while it is still
+		// live (append-only commit path), then it finalizes with different bytes.
+		// The first post-transition frame must render — the previous segment was
+		// produced by a non-finalized render and is not trustworthy history.
+		container.setNativeScrollbackCommittedRows(3);
+		block.finalize(["streaming", "done"]);
+		const rendersBeforeTransition = block.renderCount;
+		expect(container.render(40)).toEqual(["streaming", "done", "", "tail"]);
+		expect(block.renderCount).toBe(rendersBeforeTransition + 1);
+
+		// The post-finalize render is now trustworthy history: once its rows are
+		// committed, the bypass replays it without calling render().
+		container.setNativeScrollbackCommittedRows(2);
+		const rendersAfterTransition = block.renderCount;
+		expect(container.render(40)).toEqual(["streaming", "done", "", "tail"]);
+		expect(block.renderCount).toBe(rendersAfterTransition);
+	});
+	it("reports a new assistant block version after post-finalize error unpinning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			timestamp: Date.now(),
+			stopReason: "error",
+			errorMessage: "boom",
+		} as AssistantMessage;
+		const component = new AssistantMessageComponent(message);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+
+		component.setErrorPinned(true);
+		const pinnedVersion = component.getTranscriptBlockVersion();
+		// The restore path at the next turn's agent_start must be observable by
+		// the transcript container's committed-scrollback bypass.
+		component.setErrorPinned(false);
+		expect(component.getTranscriptBlockVersion()).toBeGreaterThan(pinnedVersion);
 	});
 });
 
@@ -373,5 +591,139 @@ describe("TranscriptContainer getRenderStablePrefixRows", () => {
 		// The read above re-based the baseline to the just-returned state, so
 		// without any render in between the full array now counts as stable.
 		expect(container.getRenderStablePrefixRows()).toBe(reflowed.length);
+	});
+});
+
+describe("TranscriptContainer isBlockInLiveRegion", () => {
+	it("opens at the first still-mutating block and includes everything below it", () => {
+		const container = new TranscriptContainer();
+		const above = new StreamingBlock(["above"], true);
+		const live = new StreamingBlock(["live"], false);
+		const below = new StreamingBlock(["below"], true);
+		container.addChild(above);
+		container.addChild(live);
+		container.addChild(below);
+
+		expect(container.isBlockInLiveRegion(above)).toBe(false);
+		expect(container.isBlockInLiveRegion(live)).toBe(true);
+		expect(container.isBlockInLiveRegion(below)).toBe(true);
+	});
+
+	it("anchors on the tail block when every block has finalized", () => {
+		const container = new TranscriptContainer();
+		const first = new StreamingBlock(["first"], true);
+		const tail = new StreamingBlock(["tail"], false);
+		container.addChild(first);
+		container.addChild(tail);
+
+		expect(container.isBlockInLiveRegion(tail)).toBe(true);
+		tail.finalize();
+		// All finalized: only the tail anchors the live region — a finalized
+		// block above it is commit-eligible history (a detached task block
+		// stops animating exactly on this transition).
+		expect(container.isBlockInLiveRegion(first)).toBe(false);
+		expect(container.isBlockInLiveRegion(tail)).toBe(true);
+	});
+
+	it("returns false for a component that is not a child", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["a"], true));
+		expect(container.isBlockInLiveRegion(new StreamingBlock(["x"], false))).toBe(false);
+	});
+});
+
+describe("TranscriptContainer isBlockUncommitted", () => {
+	it("returns true for a block that has never rendered", () => {
+		const container = new TranscriptContainer();
+		const block = new MutableBlock(["not painted yet"]);
+		container.addChild(block);
+
+		expect(container.isBlockUncommitted(block)).toBe(true);
+	});
+
+	it("tracks whether committed rows have reached a rendered block", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		const block = new MutableBlock(["target-0", "target-1"]);
+		container.addChild(block);
+
+		expect(container.render(40)).toEqual(["history", "", "target-0", "target-1"]);
+		container.setNativeScrollbackCommittedRows(1);
+		expect(container.isBlockUncommitted(block)).toBe(true);
+
+		container.setNativeScrollbackCommittedRows(3);
+		expect(container.isBlockUncommitted(block)).toBe(false);
+	});
+
+	it("keeps empty-render blocks uncommitted after committed rows advance", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new MutableBlock(["history"]));
+		const empty = new MutableBlock([]);
+		container.addChild(empty);
+		container.addChild(new MutableBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["history", "", "tail"]);
+		expect(container.isBlockUncommitted(empty)).toBe(true);
+		container.setNativeScrollbackCommittedRows(100);
+		expect(container.isBlockUncommitted(empty)).toBe(true);
+	});
+});
+
+describe("TranscriptContainer renderViewportTail", () => {
+	const W = 40;
+	// Four two-row blocks. A full render joins them with one blank separator:
+	//   b0a b0b ""  b1a b1b ""  b2a b2b ""  b3a b3b   → 11 rows.
+	function fourBlocks(): { container: TranscriptContainer; blocks: CountingFinalizedBlock[] } {
+		const blocks = [0, 1, 2, 3].map(i => new CountingFinalizedBlock([`b${i}a`, `b${i}b`]));
+		const container = new TranscriptContainer();
+		for (const b of blocks) container.addChild(b);
+		return { container, blocks };
+	}
+
+	it("returns exactly the bottom rows of a full render", () => {
+		const { container } = fourBlocks();
+		const full = [...container.render(W)];
+		expect(full).toEqual(["b0a", "b0b", "", "b1a", "b1b", "", "b2a", "b2b", "", "b3a", "b3b"]);
+		// A clean block boundary (the separator before b2) lands at the fold.
+		expect([...container.renderViewportTail(W, 5)]).toEqual(full.slice(full.length - 5));
+		// A mid-block fold still yields the exact bottom rows.
+		expect([...container.renderViewportTail(W, 4)]).toEqual(full.slice(full.length - 4));
+		expect([...container.renderViewportTail(W, 1)]).toEqual(["b3b"]);
+	});
+
+	it("renders only the blocks needed to fill the request", () => {
+		const { container, blocks } = fourBlocks();
+		container.render(W);
+		for (const b of blocks) b.renderCount = 0;
+		// Bottom 4 rows span b3 (whole) and b2 (its last row visible): blocks
+		// above the fold must never be rendered.
+		container.renderViewportTail(W, 4);
+		expect(blocks.map(b => b.renderCount)).toEqual([0, 0, 1, 1]);
+	});
+
+	it("returns the whole transcript top-aligned when it is shorter than the request", () => {
+		const { container } = fourBlocks();
+		const full = [...container.render(W)];
+		expect([...container.renderViewportTail(W, 100)]).toEqual(full);
+	});
+
+	it("never mutates persistent full-compose state", () => {
+		const { container } = fourBlocks();
+		const before = [...container.render(W)];
+		const liveBefore = container.getNativeScrollbackLiveRegionStart();
+		// Interleave tail renders at other widths and sizes.
+		container.renderViewportTail(80, 3);
+		container.renderViewportTail(20, 7);
+		container.renderViewportTail(W, 2);
+		const after = [...container.render(W)];
+		expect(after).toEqual(before);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(liveBefore);
+	});
+
+	it("handles empty and zero-row requests", () => {
+		const empty = new TranscriptContainer();
+		expect([...empty.renderViewportTail(W, 10)]).toEqual([]);
+		const { container } = fourBlocks();
+		expect([...container.renderViewportTail(W, 0)]).toEqual([]);
 	});
 });

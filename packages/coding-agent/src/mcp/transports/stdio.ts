@@ -7,9 +7,9 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
 import { getProjectDir, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import { type Subprocess, spawn } from "bun";
+import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
 	JsonRpcError,
 	JsonRpcMessage,
@@ -22,15 +22,40 @@ import type {
 import { toJsonRpcError } from "../../mcp/types";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
-/** Subprocess argv for launching an MCP stdio server. */
+/** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
 	cmd: string[];
+	/**
+	 * Hide the Windows console window for the direct child.
+	 *
+	 * Windows uses this only when the OMP host has no console to share. When
+	 * the host is running inside a terminal, `windowsHide: true` maps to
+	 * `CREATE_NO_WINDOW`, which strips that inheritable console from hidden
+	 * `cmd.exe` / PowerShell wrapper chains. Their console grandchildren then
+	 * allocate fresh visible conhost windows during startup or reconnects
+	 * (#3567).
+	 */
+	windowsHide?: boolean;
+	/**
+	 * Run the subprocess in its own session.
+	 *
+	 * POSIX: `true`. Detach → `setsid`, so the MCP process tree has no
+	 * controlling terminal and terminal job-control signals (Ctrl+Z SIGTSTP,
+	 * background-read SIGTTIN) cannot stop stdio servers such as
+	 * `chrome-devtools-mcp` and leave our read loop blocked on silent pipes.
+	 *
+	 * Windows: `false`. There is no SIGTSTP/SIGTTIN to escape, and Windows
+	 * wrapper chains must stay in the OMP console session so nested console
+	 * grandchildren keep stdout routed through our pipe (#3544).
+	 */
+	detached: boolean;
 }
 
 /** Inputs used to resolve platform-specific stdio spawn behavior. */
 export interface ResolveStdioSpawnOptions {
 	cwd: string;
 	env: Record<string, string | undefined>;
+	hostHasInheritableConsole?: boolean;
 	platform?: NodeJS.Platform;
 }
 
@@ -84,27 +109,93 @@ async function resolveWindowsCommandPath(
 	env: Record<string, string | undefined>,
 ): Promise<string | null> {
 	const extensions = getWindowsPathExt(env);
-	if (hasExecutableExtension(command, extensions)) return command;
+	const hasExt = hasExecutableExtension(command, extensions);
+	const candidates = hasExt ? [command] : extensions.map(ext => `${command}${ext}`);
 
-	const candidates = extensions.map(ext => `${command}${ext}`);
 	if (hasPathSegment(command)) {
 		for (const candidate of candidates) {
 			const resolved = path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate);
 			if (await fileExists(resolved)) return resolved;
 		}
-		return null;
+		return hasExt ? command : null;
 	}
 
+	// Match cmd.exe's lookup order for an unqualified name: current directory
+	// first, then PATH. Skipping cwd would launch a global shim instead of a
+	// project-local one with the same name.
+	const searchDirs = [cwd];
 	const pathValue = getCaseInsensitiveEnv(env, "PATH");
-	if (!pathValue) return null;
-	for (const dir of pathValue.split(";")) {
-		if (!dir) continue;
+	if (pathValue) {
+		for (const dir of pathValue.split(";")) {
+			if (dir) searchDirs.push(dir);
+		}
+	}
+	for (const dir of searchDirs) {
 		for (const candidate of candidates) {
 			const resolved = path.join(dir, candidate);
 			if (await fileExists(resolved)) return resolved;
 		}
 	}
-	return null;
+	return hasExt ? command : null;
+}
+
+function resolveWindowsShimPath(value: string, shimDir: string): string | null {
+	const match = /^%dp0%[\\/]*(.*)$/i.exec(value);
+	if (!match) return null;
+	const suffix = match[1];
+	if (!suffix) return shimDir;
+	return path.join(shimDir, ...suffix.split(/[\\/]+/).filter(Boolean));
+}
+
+async function resolveWindowsNpmShimCommand(
+	command: string,
+	args: readonly string[],
+	cwd: string,
+	windowsHide: boolean,
+): Promise<StdioSpawnCommand | null> {
+	if (!isWindowsBatchCommand(command)) return null;
+	if (!hasPathSegment(command)) return null;
+	const commandPath = path.resolve(cwd, command);
+	const commandName = path
+		.basename(commandPath)
+		.replace(/\.cmd$/i, "")
+		.toLowerCase();
+	if (commandName === "npx") return null;
+
+	let content: string;
+	try {
+		content = await Bun.file(commandPath).text();
+	} catch {
+		return null;
+	}
+
+	// cmd-shim emits the same invocation line for every interpreter; only
+	// bypass cmd.exe when the shim's fallback interpreter is actually node.
+	// The IF EXIST branch assigns a %dp0%-prefixed value, so requiring a
+	// non-%-leading SET value picks the bare PATH-fallback program name.
+	const prog = /SET\s+"_prog=([^%"][^"]*)"/i.exec(content)?.[1];
+	if (
+		!prog ||
+		path
+			.basename(prog)
+			.replace(/\.exe$/i, "")
+			.toLowerCase() !== "node"
+	)
+		return null;
+
+	const rawTarget = /"%_prog%"\s+"([^"]+)"\s+%\*/i.exec(content)?.[1];
+	if (!rawTarget) return null;
+
+	const target = resolveWindowsShimPath(rawTarget, path.dirname(commandPath));
+	if (!target) return null;
+
+	const siblingNode = path.join(path.dirname(commandPath), "node.exe");
+	const nodeCommand = (await fileExists(siblingNode)) ? siblingNode : "node";
+	return {
+		cmd: [nodeCommand, target, ...args],
+		windowsHide,
+		detached: false,
+	};
 }
 
 function quoteCmdArg(value: string): string {
@@ -139,20 +230,45 @@ function buildCmdExeCommand(command: string, args: readonly string[]): string {
 	return `"${quotedCommand}"`;
 }
 
-/** Resolve the subprocess argv used to launch an MCP stdio server. */
+/**
+ * Resolve the subprocess argv used to launch an MCP stdio server.
+ *
+ * On Windows, our PATH/PATHEXT walk may return `null` for a bare command
+ * (e.g. `npx`) — `Bun.env.PATH` empty under a restricted parent process,
+ * UNC/network mounts that reject `fs.access`, locked-down shells. The
+ * legacy fallback handed `Bun.spawn` the bare name, but `CreateProcess`
+ * only appends `.exe` for extensionless names — `.cmd`/`.bat` are never
+ * tried, so `npx` (which exists only as `npx.cmd` on Windows) crashes the
+ * subprocess immediately. When the resolver can't pin the command down,
+ * route through `cmd.exe /d /s /c` so Windows's own PATHEXT lookup runs.
+ */
 export async function resolveStdioSpawnCommand(
 	config: MCPStdioServerConfig,
 	options: ResolveStdioSpawnOptions,
 ): Promise<StdioSpawnCommand> {
 	const args = config.args ?? [];
-	if (options.platform !== "win32") return { cmd: [config.command, ...args] };
+	if (options.platform !== "win32") return { cmd: [config.command, ...args], detached: true };
 
-	const resolvedCommand =
-		(await resolveWindowsCommandPath(config.command, options.cwd, options.env)) ?? config.command;
-	if (!isWindowsBatchCommand(resolvedCommand)) return { cmd: [resolvedCommand, ...args] };
+	const windowsHide = options.hostHasInheritableConsole === undefined ? true : !options.hostHasInheritableConsole;
+	const resolved = await resolveWindowsCommandPath(config.command, options.cwd, options.env);
+	const resolvedCommand = resolved ?? config.command;
+	const npmShimCommand = await resolveWindowsNpmShimCommand(resolvedCommand, args, options.cwd, windowsHide);
+	if (npmShimCommand) return npmShimCommand;
+
+	// Direct-spawn only when we resolved to a concrete file AND its extension
+	// is not a batch script. Everything else (resolved .cmd/.bat, or an
+	// unresolved extensionless command) goes through cmd.exe so PATHEXT runs.
+	// Windows stdio servers stay attached so wrapper grandchildren inherit the
+	// same console session. Only hide the child when OMP itself has no console
+	// to share; CREATE_NO_WINDOW breaks console inheritance for nested wrappers.
+	const detached = false;
+	const needsCmdExe = resolved === null || isWindowsBatchCommand(resolvedCommand);
+	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args], windowsHide, detached };
 
 	return {
 		cmd: [resolveComSpec(options.env), "/d", "/s", "/c", buildCmdExeCommand(resolvedCommand, args)],
+		windowsHide,
+		detached,
 	};
 }
 
@@ -246,8 +362,14 @@ export class StdioTransport implements MCPTransport {
 			cwd,
 			env,
 			platform: process.platform,
+			hostHasInheritableConsole: hostHasInheritableConsole(),
 		});
 
+		// Platform-derived session and console-window handling come from
+		// `resolveStdioSpawnCommand`: POSIX detaches into its own session to
+		// escape terminal job-control signals (SIGTSTP, SIGTTIN); Windows stays
+		// attached, and only hides the child when the host has no console to
+		// share. See `StdioSpawnCommand`.
 		this.#process = spawn({
 			cmd: spawnCommand.cmd,
 			cwd,
@@ -255,6 +377,8 @@ export class StdioTransport implements MCPTransport {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
+			windowsHide: spawnCommand.windowsHide,
+			detached: spawnCommand.detached,
 		});
 
 		this.#connected = true;
@@ -451,17 +575,27 @@ export class StdioTransport implements MCPTransport {
 
 		const stdin = this.#process.stdin;
 		const message = `${JSON.stringify(request)}\n`;
-		try {
-			// Await both: Bun's FileSink can surface a broken pipe either as a
-			// synchronous throw or as a rejected Promise (the EPIPE arrives on a
-			// processTicksAndRejections tick). Awaiting funnels both into this catch
-			// so the request rejects cleanly instead of leaving a floating rejected
-			// promise that crashes the process via the unhandledRejection handler.
-			await stdin.write(message);
-			await stdin.flush();
-		} catch (error: unknown) {
+		const failFromSend = (error: unknown) => {
+			if (settled) return;
 			cleanup();
 			reject(error instanceof Error ? error : new Error(String(error)));
+		};
+		try {
+			// Never `await` write/flush. Bun's FileSink returns a pending Promise
+			// once the OS pipe buffer fills (default ~64 KB on POSIX), and a
+			// subprocess that stops draining stdin will park those awaits forever.
+			// Awaiting here would keep the async fn stuck above `return promise`,
+			// past the timeout timer and the abort handler, orphaning the deferred
+			// rejection and hanging the caller (#3945). Route sync throws (Windows
+			// EPIPE) and async rejections (POSIX EPIPE on processTicksAndRejections)
+			// into `reject()` while leaving the returned promise free to settle
+			// from the response, timer, abort signal, or read-loop transport-close.
+			const wrote = stdin.write(message);
+			if (isThenable(wrote)) wrote.then(undefined, failFromSend);
+			const flushed = stdin.flush();
+			if (isThenable(flushed)) flushed.then(undefined, failFromSend);
+		} catch (error) {
+			failFromSend(error);
 		}
 
 		return promise;
@@ -512,7 +646,8 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		if (this.#readLoop) {
-			await this.#readLoop.catch(() => {});
+			// Do not block/await the read loop as it can hang indefinitely in some environments
+			this.#readLoop.catch(() => {});
 			this.#readLoop = null;
 		}
 	}

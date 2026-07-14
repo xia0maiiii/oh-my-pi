@@ -21,7 +21,6 @@ import {
 	type Component,
 	Container,
 	Editor,
-	extractPrintableText,
 	fuzzyMatch,
 	Input,
 	matchesKey,
@@ -37,6 +36,7 @@ import {
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirs } from "../../config";
+import type { AgentMode } from "../../config/agent-mode";
 import type { ModelRegistry } from "../../config/model-registry";
 import {
 	formatModelString,
@@ -44,16 +44,25 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
-import { Settings } from "../../config/settings";
+import { DEFAULT_AGENT_MODE, Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
+import agentCreationRedteamArchitectPrompt from "../../prompts/system/agent-creation-redteam-architect.md" with {
+	type: "text",
+};
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
 import { discoverAgents } from "../../task/discovery";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { getEditorTheme, theme } from "../theme/theme";
-import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
+import {
+	matchesAppFollowUp,
+	matchesAppInterrupt,
+	matchesSelectDown,
+	matchesSelectUp,
+} from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
+import { clampSelection, handleTabSwitchKey, padLinesToHeight, searchableChar } from "./selector-helpers";
 
 type SourceTabId = "all" | AgentSource;
 type AgentScope = "project" | "user";
@@ -82,6 +91,7 @@ interface GeneratedAgentSpec {
 }
 
 interface AgentDashboardModelContext {
+	agentMode?: AgentMode;
 	modelRegistry?: ModelRegistry;
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
@@ -321,7 +331,7 @@ class TwoColumnBody implements Component {
 		const rightLines = this.rightPane.render(rightWidth);
 		const lineCount = this.maxHeight;
 		const out: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
+		const separator = theme.fg("dim", ` ${theme.boxRound.vertical} `);
 
 		for (let i = 0; i < lineCount; i++) {
 			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);
@@ -402,7 +412,8 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd);
+			const agentMode = this.modelContext.agentMode ?? this.#settingsManager?.get("agentMode") ?? DEFAULT_AGENT_MODE;
+			const { agents } = await discoverAgents(this.cwd, undefined, agentMode);
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 
@@ -516,31 +527,19 @@ export class AgentDashboard extends Container {
 		const lines = super.render(width);
 		// Pad to the full viewport so every state (list, edit, create) covers the
 		// screen as a true full-screen view instead of letting the transcript peek
-		// through below it. Copy before padding — the container's render result is
-		// component-owned and must not be mutated.
-		const rows = this.#terminalRows();
-		if (lines.length >= rows) return lines;
-		const padded = lines.slice();
-		while (padded.length < rows) padded.push("");
-		return padded;
+		// through below it.
+		return padLinesToHeight(lines, this.#terminalRows());
 	}
 
 	#clampSelection(): void {
-		if (this.#filteredAgents.length === 0) {
-			this.#selectedIndex = 0;
-			this.#scrollOffset = 0;
-			return;
-		}
-
-		this.#selectedIndex = Math.min(this.#selectedIndex, this.#filteredAgents.length - 1);
-		this.#selectedIndex = Math.max(0, this.#selectedIndex);
-
-		const maxVisible = this.#getMaxVisibleItems();
-		if (this.#selectedIndex < this.#scrollOffset) {
-			this.#scrollOffset = this.#selectedIndex;
-		} else if (this.#selectedIndex >= this.#scrollOffset + maxVisible) {
-			this.#scrollOffset = this.#selectedIndex - maxVisible + 1;
-		}
+		const next = clampSelection(
+			this.#selectedIndex,
+			this.#scrollOffset,
+			this.#filteredAgents.length,
+			this.#getMaxVisibleItems(),
+		);
+		this.#selectedIndex = next.selectedIndex;
+		this.#scrollOffset = next.scrollOffset;
 	}
 
 	#persistDisabledAgents(): void {
@@ -652,11 +651,6 @@ export class AgentDashboard extends Container {
 		this.#buildLayout();
 	}
 
-	#shouldSubmitCreateDescription(data: string): boolean {
-		if (matchesKey(data, "ctrl+enter")) return true;
-		return process.platform === "win32" && data === "\n" && this.#createDescription.trim().length > 0;
-	}
-
 	async #generateAgentFromDescription(rawDescription: string): Promise<void> {
 		const description = rawDescription.trim();
 		this.#createDescription = description;
@@ -705,11 +699,14 @@ export class AgentDashboard extends Container {
 			throw new Error("No available model to generate agent specification.");
 		}
 
-		const systemPrompt = prompt.render(agentCreationArchitectPrompt, {});
+		const architectPrompt =
+			this.modelContext.agentMode === "redteam" ? agentCreationRedteamArchitectPrompt : agentCreationArchitectPrompt;
+		const systemPrompt = prompt.render(architectPrompt, {});
 		const userPrompt = prompt.render(agentCreationUserPrompt, { request: description });
 
 		const { session } = await createAgentSession({
 			cwd: this.cwd,
+			agentMode: this.modelContext.agentMode,
 			authStorage: modelRegistry.authStorage,
 			modelRegistry,
 			settings,
@@ -911,7 +908,7 @@ export class AgentDashboard extends Container {
 		this.addChild(new Spacer(1));
 		const hints = this.#createGenerating
 			? " Generating..."
-			: " Ctrl+Enter: generate  Enter: newline  Tab: toggle scope  Esc: cancel";
+			: " Ctrl+Q/Ctrl+Enter: generate  Enter: newline  Tab: toggle scope  Esc: cancel";
 		this.addChild(new Text(theme.fg("dim", hints), 0, 0));
 	}
 
@@ -1102,7 +1099,7 @@ export class AgentDashboard extends Container {
 				}
 				return;
 			}
-			if (!this.#createGenerating && this.#shouldSubmitCreateDescription(data)) {
+			if (!this.#createGenerating && matchesAppFollowUp(data)) {
 				this.#submitCreateDescription();
 				return;
 			}
@@ -1150,12 +1147,7 @@ export class AgentDashboard extends Container {
 			return;
 		}
 
-		if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-			this.#switchTab(1);
-			return;
-		}
-		if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
-			this.#switchTab(-1);
+		if (handleTabSwitchKey(data, direction => this.#switchTab(direction))) {
 			return;
 		}
 
@@ -1190,17 +1182,11 @@ export class AgentDashboard extends Container {
 			return;
 		}
 
-		const printableText = extractPrintableText(data);
-		if (printableText && printableText.length === 1) {
-			const printableCharCode = printableText.charCodeAt(0);
-			if (printableCharCode > 32 && printableCharCode < 127) {
-				if (printableText === "j" || printableText === "k") {
-					return;
-				}
-				this.#searchQuery += printableText;
-				this.#applyFilters();
-				this.#buildLayout();
-			}
+		const char = searchableChar(data);
+		if (char !== null) {
+			this.#searchQuery += char;
+			this.#applyFilters();
+			this.#buildLayout();
 		}
 	}
 }

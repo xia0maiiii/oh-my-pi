@@ -192,8 +192,34 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 
 // ── fetchMarketplace ──────────────────────────────────────────────────
 
-/** Relative path from a marketplace root to its catalog file. */
-const CATALOG_RELATIVE_PATH = path.join(".claude-plugin", "marketplace.json");
+/**
+ * Catalog paths tried in priority order: omp-namespaced override first, then
+ * the Claude Code-compatible fallback so existing marketplaces keep loading.
+ */
+const CATALOG_RELATIVE_PATHS: readonly string[] = [".omp-plugin/marketplace.json", ".claude-plugin/marketplace.json"];
+
+async function readMarketplaceCatalog(
+	root: string,
+	options: { relativeDisplayPaths?: boolean } = {},
+): Promise<{ catalogPath: string; displayPath: string; content: string }> {
+	const tried: string[] = [];
+	for (const rel of CATALOG_RELATIVE_PATHS) {
+		const catalogPath = path.join(root, ...rel.split("/"));
+		const displayPath = options.relativeDisplayPaths ? rel : catalogPath;
+		tried.push(displayPath);
+		try {
+			const content = await Bun.file(catalogPath).text();
+			return { catalogPath, displayPath, content };
+		} catch (err) {
+			if (isEnoent(err)) continue;
+			throw err;
+		}
+	}
+	throw new Error(
+		`Marketplace catalog not found at ${tried.map(p => `"${p}"`).join(" or ")}. ` +
+			`Ensure the directory exists and contains one of: ${CATALOG_RELATIVE_PATHS.join(", ")}.`,
+	);
+}
 
 /**
  * Expand a `~/...` path to an absolute path using os.homedir().
@@ -220,32 +246,18 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 
 	if (type === "local") {
 		const resolved = path.resolve(expandHome(source));
-		const catalogPath = path.join(resolved, CATALOG_RELATIVE_PATH);
-
-		let content: string;
-		try {
-			content = await Bun.file(catalogPath).text();
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new Error(
-					`Marketplace catalog not found at "${catalogPath}". ` +
-						`Ensure the directory exists and contains a .claude-plugin/marketplace.json file.`,
-				);
-			}
-			throw err;
-		}
-
+		const { catalogPath, content } = await readMarketplaceCatalog(resolved);
 		const catalog = parseMarketplaceCatalog(content, catalogPath);
 		return { catalog };
 	}
 
 	if (type === "github") {
 		const url = `https://github.com/${source}.git`;
-		return cloneAndReadCatalog(url, cacheDir);
+		return cloneAndReadCatalog(url, source, cacheDir);
 	}
 
 	if (type === "git") {
-		return cloneAndReadCatalog(source, cacheDir);
+		return cloneAndReadCatalog(source, source, cacheDir);
 	}
 
 	// type === "url"
@@ -273,34 +285,21 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
  * responsible for promoting the clone to its final cache location via
  * `promoteCloneToCache` after any duplicate/drift checks pass.
  */
-async function cloneAndReadCatalog(url: string, cacheDir: string): Promise<FetchResult> {
+async function cloneAndReadCatalog(url: string, source: string, cacheDir: string): Promise<FetchResult> {
 	const tmpDir = path.join(cacheDir, `.tmp-clone-${Date.now()}`);
 	await fs.mkdir(cacheDir, { recursive: true });
 
 	logger.debug(`[marketplace] cloning ${url} → ${tmpDir}`);
 	await git.clone(url, tmpDir);
 
-	const catalogPath = path.join(tmpDir, CATALOG_RELATIVE_PATH);
-	let content: string;
 	try {
-		content = await Bun.file(catalogPath).text();
-	} catch (err) {
-		await fs.rm(tmpDir, { recursive: true, force: true });
-		if (isEnoent(err)) {
-			throw new Error(`Cloned repository has no marketplace catalog at ${CATALOG_RELATIVE_PATH}`);
-		}
-		throw err;
-	}
-
-	let catalog: MarketplaceCatalog;
-	try {
-		catalog = parseMarketplaceCatalog(content, catalogPath);
+		const { displayPath, content } = await readMarketplaceCatalog(tmpDir, { relativeDisplayPaths: true });
+		const catalog = parseMarketplaceCatalog(content, displayPath);
+		return { catalog, clonePath: tmpDir };
 	} catch (err) {
 		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-		throw err;
+		throw new Error(`Cloned repository ${url}: ${(err as Error).message} (source: ${source})`, { cause: err });
 	}
-
-	return { catalog, clonePath: tmpDir };
 }
 
 /**

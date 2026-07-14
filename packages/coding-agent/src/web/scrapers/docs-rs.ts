@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { gunzipSync } from "node:zlib";
-import { getAgentDir, isEnoent, logger, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getDocsRsCacheDir, isEnoent, logger, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, MAX_BYTES } from "./types";
@@ -276,8 +276,18 @@ function findItemInModule(mod_: RustdocItem, name: string, index: Record<string,
 	return null;
 }
 
-const DOCS_RS_CACHE_ROOT = "webcache";
 const DOCS_RS_CACHE_FILENAME = "rustdoc.json";
+
+/** Hard ceiling for decompressed rustdoc JSON: a 50 MB compressed payload can
+ *  expand far enough to block the event loop or OOM without a cap. Exceeding it
+ *  throws (RangeError), which the fetch path converts to a `null` result. */
+export const MAX_RUSTDOC_GUNZIP_BYTES = 256 * 1024 * 1024;
+
+/** Decompress a docs.rs rustdoc gzip payload with the output-size cap applied.
+ *  `maxOutputLength` is overridable only for tests exercising the cap contract. */
+export function gunzipRustdocJson(compressed: Buffer, maxOutputLength: number = MAX_RUSTDOC_GUNZIP_BYTES): string {
+	return gunzipSync(compressed, { maxOutputLength }).toString("utf-8");
+}
 
 function sanitizeCacheSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]+/g, "_");
@@ -291,7 +301,7 @@ function getDocsRsCacheVersionSegment(version: string, now = new Date()): string
 function getDocsRsCachePath(target: DocsRsTarget, now = new Date()): string {
 	const crate = sanitizeCacheSegment(target.crateName);
 	const version = getDocsRsCacheVersionSegment(target.version, now);
-	return path.join(getAgentDir(), DOCS_RS_CACHE_ROOT, `docsrs_${crate}_${version}`, DOCS_RS_CACHE_FILENAME);
+	return path.join(getDocsRsCacheDir(), `docsrs_${crate}_${version}`, DOCS_RS_CACHE_FILENAME);
 }
 
 async function readCachedRustdocCrate(
@@ -400,7 +410,7 @@ export const handleDocsRs: SpecialHandler = async (
 		}
 
 		const compressed = Buffer.concat(chunks);
-		const jsonStr = gunzipSync(compressed).toString("utf-8");
+		const jsonStr = gunzipRustdocJson(compressed);
 		crate_ = tryParseJson<RustdocCrate>(jsonStr);
 		if (crate_?.index) {
 			await writeCachedRustdocCrate(target, jsonStr);

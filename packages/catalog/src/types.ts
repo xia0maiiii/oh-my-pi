@@ -1,10 +1,14 @@
 import type { Effort } from "./effort";
 
+// Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
+// `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
+export type { FetchImpl } from "@oh-my-pi/pi-utils";
 export type { KnownProvider } from "./provider-models/descriptors";
 
 export type KnownApi =
 	| "openai-completions"
 	| "openai-responses"
+	| "openrouter"
 	| "openai-codex-responses"
 	| "azure-openai-responses"
 	| "anthropic-messages"
@@ -13,7 +17,9 @@ export type KnownApi =
 	| "google-gemini-cli"
 	| "google-vertex"
 	| "ollama-chat"
-	| "cursor-agent";
+	| "cursor-agent"
+	| "gitlab-duo-agent"
+	| "devin-agent";
 export type Api = KnownApi | (string & {});
 
 /** Canonical thinking transport used by a model. */
@@ -37,9 +43,9 @@ export interface ThinkingConfig {
 	/** Optional default effort applied when this model is selected. Falls back to global default if absent. */
 	defaultLevel?: Effort;
 	/**
-	 * Effort → wire-value remap for `anthropic-adaptive` transports, baked at
-	 * build time (4-tier legacy scale vs the 5-tier Opus 4.7+/Fable/Mythos
-	 * scale). Identity for efforts the map omits.
+	 * Effort → provider wire-value remap, baked at build time. Identity for
+	 * efforts the map omits. Used by Anthropic adaptive thinking, OpenAI-
+	 * compatible `reasoning_effort`, and Responses-style reasoning params.
 	 */
 	effortMap?: Partial<Record<Effort, string>>;
 	/**
@@ -47,6 +53,36 @@ export interface ThinkingConfig {
 	 * 5). Also implies native interleaved thinking — no beta header needed.
 	 */
 	supportsDisplay?: boolean;
+	/**
+	 * Per-effort upstream wire-id routing for collapsed effort-tier variants
+	 * (`variant-collapse.ts`). Keyed by pi effort; `"off"` applies when
+	 * thinking is disabled. Missing keys fall back to `requestModelId ?? id`.
+	 */
+	effortRouting?: Readonly<Partial<Record<Effort | "off", string>>>;
+	/**
+	 * Per-effort thinking budget in tokens, baked at build time for collapsed
+	 * variants whose upstream expects an explicit `thinkingBudget` instead of a
+	 * value derived from the generic ladder (Antigravity Cloud Code Assist
+	 * gemini-3.x). Request mapping prefers caller `thinkingBudgets`, then this
+	 * map, then the provider default ladder. Only meaningful for `mode: "budget"`.
+	 */
+	effortBudgets?: Readonly<Partial<Record<Effort, number>>>;
+	/**
+	 * When true, a thinking-off request MUST explicitly suppress thinking on
+	 * the wire (google-level: `thinkingLevel: "MINIMAL"` + `includeThoughts:
+	 * false`; budget: `thinkingBudget: 0`) instead of omitting thinkingConfig —
+	 * Cloud Code Assist re-applies the per-id baked server default when the
+	 * config is absent.
+	 */
+	suppressWhenOff?: boolean;
+	/**
+	 * Reasoning is mandatory upstream: the endpoint rejects disabled or
+	 * omitted thinking (e.g. OpenRouter Gemini 3.x — "Reasoning is mandatory
+	 * for this endpoint and cannot be disabled"). Request mapping clamps
+	 * thinking-off to the lowest supported effort unless `suppressWhenOff`
+	 * provides an explicit wire off-path.
+	 */
+	requiresEffort?: boolean;
 }
 
 // `Provider` is any provider-id string; `KnownProvider` (re-exported above) enumerates
@@ -56,26 +92,26 @@ export type Provider = string;
 /** Token budgets for each thinking level (token-based providers only) */
 export type ThinkingBudgets = { [key in Effort]?: number };
 
-/**
- * `fetch`-compatible function. Accepts any callable matching the standard
- * fetch signature; `preconnect` is optional because non-Bun runtimes (browsers,
- * test mocks) won't expose it.
- */
-export type FetchImpl = ((input: string | URL | Request, init?: RequestInit) => Promise<Response>) & {
-	preconnect?: typeof globalThis.fetch.preconnect;
-};
-
 export interface Usage {
-	/** Non-cached input tokens (matches the bucket the provider bills as new input). */
+	/** Non-cached conversation input tokens (matches the bucket the provider bills as new input). */
 	input: number;
-	/** Total output tokens for the turn, including thinking, assistant text, and tool-call argument tokens. */
+	/** Total conversation output tokens for the turn, including thinking, assistant text, and tool-call argument tokens. */
 	output: number;
-	/** Tokens read from the prompt cache. */
+	/** Conversation tokens read from the prompt cache. */
 	cacheRead: number;
-	/** Tokens written to the prompt cache (cache creation). */
+	/** Conversation tokens written to the prompt cache (cache creation). */
 	cacheWrite: number;
-	/** Sum of input + output + cacheRead + cacheWrite. */
+	/** Sum of input + output + cacheRead + cacheWrite plus provider-side orchestration tokens when reported. */
 	totalTokens: number;
+	/** Provider-side orchestration tokens, billed but not part of the conversation prompt/cache buckets. */
+	orchestration?: {
+		/** Non-cached orchestration input tokens. */
+		input?: number;
+		/** Orchestration tokens read from provider-side cache. */
+		cacheRead?: number;
+		/** Orchestration output tokens. */
+		output?: number;
+	};
 	/** Copilot premium-request counter, when applicable. */
 	premiumRequests?: number;
 	/**
@@ -112,6 +148,18 @@ export interface Usage {
 	};
 }
 
+export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template";
+
+export type OpenAIReasoningDisableMode =
+	| "omit"
+	| "lowest-effort"
+	| "openrouter-enabled-false"
+	| "zai-thinking-disabled"
+	| "qwen-enable-thinking-false"
+	| "qwen-template-false";
+
+export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
+
 /**
  * Compatibility settings for openai-completions API.
  * Use this to override URL-based auto-detection for custom providers.
@@ -140,6 +188,13 @@ export interface OpenAICompat {
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
+	/**
+	 * Enable the Gemini thinking-loop guard (pi-ai stream layer) for this model.
+	 * Defaults to true when the model id classifies as the gemini family. Set
+	 * explicitly to cover an opaque OpenAI-compat proxy alias (e.g. `my-model`)
+	 * that routes to Gemini, or to false to opt a gemini-family id out.
+	 */
+	enableGeminiThinkingLoopGuard?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
 	maxTokensField?: "max_completion_tokens" | "max_tokens";
 	/** Whether tool results require the `name` field. Default: auto-detected from URL. */
@@ -151,19 +206,79 @@ export interface OpenAICompat {
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
 	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" | "disabled" } (also used by Moonshot Kimi), "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
-	thinkingFormat?: "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template";
+	thinkingFormat?: OpenAIReasoningFormat;
+	/** Request-time disable encoding for the selected reasoning/thinking format. Default: derived from `thinkingFormat`. */
+	reasoningDisableMode?: OpenAIReasoningDisableMode;
+	/** Whether the provider rejects `reasoning.effort`/`reasoning_effort` even when the model reasons natively. Default: false unless reasoning effort is unsupported. */
+	omitReasoningEffort?: boolean;
+	/** Whether Responses requests should ask for encrypted reasoning replay items. Default: true. */
+	includeEncryptedReasoning?: boolean;
+	/** Whether replayed Responses history should strip native `type: "reasoning"` items before request encoding. Default: false. */
+	filterReasoningHistory?: boolean;
 	/** Optional `thinking.keep` value for Z.ai/Moonshot-style thinking params. Set false to suppress auto-detected keep. Default: auto-detected. */
 	thinkingKeep?: "all" | false;
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
 	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text";
 	/** Whether assistant tool-call messages must include reasoning content. Default: false. */
 	requiresReasoningContentForToolCalls?: boolean;
+	/** Whether all assistant messages must include reasoning content. Default: false. */
+	requiresReasoningContentForAllAssistantTurns?: boolean;
 	/** Whether the provider accepts a synthetic placeholder (e.g. ".") for missing reasoning_content on tool-call turns. Default: true. Set to false for providers like DeepSeek that validate the exact reasoning_content value. */
 	allowsSyntheticReasoningContentForToolCalls?: boolean;
+	/**
+	 * Replay preserved thinking blocks as `reasoning_content` (or the configured
+	 * `reasoningContentField`) on EVERY assistant turn that carried reasoning,
+	 * regardless of whether the upstream provider validates the field. Local
+	 * llama.cpp-style servers (llama.cpp, LM Studio, vLLM, sglang, Ollama in
+	 * openai-completions mode) re-tokenize the full chat-template prompt every
+	 * request; Qwen3 / DeepSeek-R1 / GLM templates reconstruct the `<think>`
+	 * block from `reasoning_content`. Dropping the field re-renders the
+	 * assistant turn without `<think>`, diverging from the slot's KV cache state
+	 * and forcing full prompt re-processing (#3528). Default: auto-detected
+	 * (loopback/private baseUrl or local provider id with thinking-enabled
+	 * models).
+	 */
+	replayReasoningContent?: boolean;
+	/**
+	 * Send `preserve_thinking: true` so the Qwen3.6+ chat template renders
+	 * `<think>...</think>` markup for EVERY assistant turn (not just turns
+	 * after the last user message). Without it, the template strips the think
+	 * block from older assistant turns:
+	 *
+	 * ```jinja
+	 * {%- if (preserve_thinking is defined and preserve_thinking is true)
+	 *        or (loop.index0 > ns.last_query_index) %}
+	 *   <|im_start|>assistant\n<think>\n{rc}\n</think>\n\n{content}
+	 * {%- else %}
+	 *   <|im_start|>assistant\n{content}
+	 * ```
+	 *
+	 * The cache from the original generation has `<think>...</think>` tokens,
+	 * so once a new user message arrives the prior assistant turns become
+	 * "older" and the stripped re-render diverges — full prompt re-processing
+	 * on SWA models (#3541). Default: auto-detected (Qwen thinking format on
+	 * a local llama.cpp-style backend, paired with `replayReasoningContent`).
+	 * Non-Qwen templates ignore the flag, so the auto-detection is safe.
+	 */
+	qwenPreserveThinking?: boolean;
 	/** Whether assistant tool-call messages must include non-empty content. Default: false. */
 	requiresAssistantContentForToolCalls?: boolean;
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
 	supportsToolChoice?: boolean;
+	/**
+	 * Whether forced `tool_choice` values (`"required"` or named tools) are accepted.
+	 * When false, request builders keep tools available but downgrade forced choices
+	 * to provider-default auto selection. Default: true.
+	 */
+	supportsForcedToolChoice?: boolean;
+	/**
+	 * Whether the chat-completions endpoint accepts the object form that pins one
+	 * named function (`{ type: "function", function: { name } }`). Some
+	 * OpenAI-compatible hosts such as llama.cpp only accept string
+	 * `tool_choice` values; request builders downgrade a named force to
+	 * `"required"` when this is false. Default: true.
+	 */
+	supportsNamedToolChoice?: boolean;
 	/**
 	 * Drop reasoning fields (`reasoning_effort`, OpenRouter `reasoning`) for
 	 * the request when `tool_choice` forces a tool call. Mirrors the Anthropic
@@ -185,10 +300,22 @@ export interface OpenAICompat {
 	vercelGatewayRouting?: VercelGatewayRouting;
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
+	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
+	promptCacheSessionHeader?: "x-grok-conv-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/** Whether the provider supports the `strict` field in tool definitions. Default: auto-detected per provider/baseUrl (conservative for unknown providers). */
 	supportsStrictMode?: boolean;
+	/**
+	 * Tool-schema dialect the endpoint validates `tools.function.parameters`
+	 * against. `"moonshot-mfjs"` triggers Moonshot Flavored JSON Schema
+	 * normalization (collapse `const`→`enum`, infer `type` on bare enums, strip
+	 * unsupported validators/`prefixItems`) because Moonshot/Kimi native hosts
+	 * reject standard JSON Schema constructs with HTTP 400. Default:
+	 * auto-detected (`"moonshot-mfjs"` on api.moonshot.ai / api.kimi.com). Set
+	 * `"none"` to opt a custom Moonshot-compatible host out.
+	 */
+	toolSchemaFlavor?: "moonshot-mfjs" | "none";
 	/**
 	 * Stream-watchdog idle-timeout floor in ms for slow reasoning hosts.
 	 * Default: auto-detected (GLM coding-plan hosts, direct DeepSeek reasoning).
@@ -204,6 +331,18 @@ export interface OpenAICompat {
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
 	strictResponsesPairing?: boolean;
+	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
+	supportsImageDetailOriginal?: boolean;
+	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
+	reasoningDeltasMayBeCumulative?: boolean;
+	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
+	stripDeepseekSpecialTokens?: boolean;
+	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */
+	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** Treat an empty length-finished stream as a context-window error. Default: auto-detected. */
+	emptyLengthFinishIsContextError?: boolean;
+	/** Normalize tool call ids to OpenAI's 40-character limit. Default: auto-detected. */
+	usesOpenAIToolCallIdLimit?: boolean;
 	/**
 	 * Compat deltas applied when a request actually engages thinking mode
 	 * (reasoning requested and not disabled, model reasoning-capable, and not
@@ -275,6 +414,18 @@ export interface AnthropicCompat {
 	 * Default: auto-detected from provider/baseUrl and `model.reasoning`.
 	 */
 	replayUnsignedThinking?: boolean;
+	/**
+	 * Whether the endpoint requires `thinking.type: "enabled"` whenever the
+	 * model reasons. Use for models that reject omitted or disabled thinking.
+	 */
+	requiresThinkingEnabled?: boolean;
+	/**
+	 * Prefix Anthropic built-in tool names (`web_search`, `code_execution`, ...)
+	 * when they are ordinary client tools. Some Anthropic-compatible gateways
+	 * intercept those exact names as server tools and return raw search/result
+	 * blocks instead of normal `tool_use` calls.
+	 */
+	escapeBuiltinToolNames?: boolean;
 }
 
 /**
@@ -304,50 +455,142 @@ export interface VercelGatewayRouting {
 type ResolvedToolStrictMode = NonNullable<OpenAICompat["toolStrictMode"]> | "mixed";
 
 /**
+ * Fields whose meaning is identical across chat-completions and Responses surfaces.
+ * Each builder still computes its own per-surface value when defaults diverge.
+ */
+export interface ResolvedOpenAISharedCompat {
+	supportsDeveloperRole: boolean;
+	supportsStrictMode: boolean;
+	supportsReasoningEffort: boolean;
+	reasoningEffortMap: Partial<Record<Effort, string>>;
+	supportsReasoningParams: boolean;
+	thinkingFormat: OpenAIReasoningFormat;
+	reasoningDisableMode: OpenAIReasoningDisableMode;
+	omitReasoningEffort: boolean;
+	includeEncryptedReasoning: boolean;
+	filterReasoningHistory: boolean;
+	disableReasoningOnForcedToolChoice: boolean;
+	disableReasoningOnToolChoice: boolean;
+	supportsToolChoice: boolean;
+	supportsForcedToolChoice: boolean;
+	supportsNamedToolChoice: boolean;
+	reasoningContentField?: OpenAICompat["reasoningContentField"];
+	requiresReasoningContentForToolCalls: boolean;
+	requiresReasoningContentForAllAssistantTurns: boolean;
+	allowsSyntheticReasoningContentForToolCalls: boolean;
+	replayReasoningContent: boolean;
+	qwenPreserveThinking: boolean;
+	requiresThinkingAsText: boolean;
+	requiresMistralToolIds: boolean;
+	requiresToolResultName: boolean;
+	requiresAssistantAfterToolResult: boolean;
+	requiresAssistantContentForToolCalls: boolean;
+	stripDeepseekSpecialTokens: boolean;
+	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	reasoningDeltasMayBeCumulative: boolean;
+	emptyLengthFinishIsContextError: boolean;
+	usesOpenAIToolCallIdLimit: boolean;
+	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
+	/** The model sits behind OpenRouter (routing prefs and max-token omission apply). */
+	isOpenRouterHost: boolean;
+	/** Whether this endpoint needs a max-token field even when caller did not set one. */
+	alwaysSendMaxTokens: boolean;
+	/** See {@link OpenAICompat.enableGeminiThinkingLoopGuard}. Set by the builder from the family classifier. */
+	enableGeminiThinkingLoopGuard?: boolean;
+	openRouterRouting?: OpenAICompat["openRouterRouting"];
+	/** Provider-specific wire model-id transform applied to the base id. */
+	wireModelIdMode: "raw" | "firepass" | "fireworks" | "openrouter";
+}
+
+/**
  * Fully-resolved chat-completions compat view: every detected default
  * materialized and user overrides applied. Built once per model by
  * `buildModel`; request handlers read fields and never detect, resolve, or
  * allocate.
  */
-export type ResolvedOpenAICompat = Required<
-	Omit<
-		OpenAICompat,
-		| "openRouterRouting"
-		| "vercelGatewayRouting"
-		| "extraBody"
-		| "toolStrictMode"
-		| "streamIdleTimeoutMs"
-		| "supportsLongPromptCacheRetention"
-		| "cacheControlFormat"
-		| "thinkingKeep"
-		| "strictResponsesPairing"
-		| "whenThinking"
-	>
-> & {
-	openRouterRouting?: OpenAICompat["openRouterRouting"];
-	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
-	extraBody?: OpenAICompat["extraBody"];
-	cacheControlFormat?: OpenAICompat["cacheControlFormat"];
-	thinkingKeep?: OpenAICompat["thinkingKeep"];
-	streamIdleTimeoutMs?: number;
-	toolStrictMode: ResolvedToolStrictMode;
-	/** The model sits behind OpenRouter (routing prefs and max-token omission apply). */
-	isOpenRouterHost: boolean;
-	/** The model sits behind Vercel AI Gateway. */
-	isVercelGatewayHost: boolean;
-	/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
-	whenThinking?: ResolvedOpenAICompat;
-};
+export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
+	Required<
+		Omit<
+			OpenAICompat,
+			| "supportsDeveloperRole"
+			| "supportsReasoningEffort"
+			| "reasoningEffortMap"
+			| "supportsReasoningParams"
+			| "thinkingFormat"
+			| "reasoningDisableMode"
+			| "omitReasoningEffort"
+			| "includeEncryptedReasoning"
+			| "filterReasoningHistory"
+			| "disableReasoningOnForcedToolChoice"
+			| "disableReasoningOnToolChoice"
+			| "supportsToolChoice"
+			| "supportsForcedToolChoice"
+			| "supportsNamedToolChoice"
+			| "reasoningContentField"
+			| "requiresReasoningContentForToolCalls"
+			| "requiresReasoningContentForAllAssistantTurns"
+			| "allowsSyntheticReasoningContentForToolCalls"
+			| "replayReasoningContent"
+			| "qwenPreserveThinking"
+			| "requiresThinkingAsText"
+			| "requiresMistralToolIds"
+			| "requiresToolResultName"
+			| "requiresAssistantAfterToolResult"
+			| "requiresAssistantContentForToolCalls"
+			| "stripDeepseekSpecialTokens"
+			| "streamMarkupHealingPattern"
+			| "reasoningDeltasMayBeCumulative"
+			| "emptyLengthFinishIsContextError"
+			| "usesOpenAIToolCallIdLimit"
+			| "promptCacheSessionHeader"
+			| "openRouterRouting"
+			| "isOpenRouterHost"
+			| "supportsStrictMode"
+			| "supportsLongPromptCacheRetention"
+			| "alwaysSendMaxTokens"
+			| "wireModelIdMode"
+			| "vercelGatewayRouting"
+			| "extraBody"
+			| "toolStrictMode"
+			| "toolSchemaFlavor"
+			| "streamIdleTimeoutMs"
+			| "cacheControlFormat"
+			| "thinkingKeep"
+			| "strictResponsesPairing"
+			| "supportsImageDetailOriginal"
+			| "enableGeminiThinkingLoopGuard"
+			| "whenThinking"
+		>
+	> & {
+		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
+		extraBody?: OpenAICompat["extraBody"];
+		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
+		thinkingKeep?: OpenAICompat["thinkingKeep"];
+		streamIdleTimeoutMs?: number;
+		toolStrictMode: ResolvedToolStrictMode;
+		toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
+		/** The model sits behind Vercel AI Gateway. */
+		isVercelGatewayHost: boolean;
+		dropThinkingWhenReasoningEffort: boolean;
+		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
+		whenThinking?: ResolvedOpenAICompat;
+	};
 
 /** Fully-resolved Responses-API compat view (same contract as `ResolvedOpenAICompat`). */
-export interface ResolvedOpenAIResponsesCompat {
-	supportsDeveloperRole: boolean;
-	supportsStrictMode: boolean;
-	supportsReasoningEffort: boolean;
+export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompat {
 	supportsLongPromptCacheRetention: boolean;
 	strictResponsesPairing: boolean;
-	reasoningEffortMap: Partial<Record<Effort, string>>;
+	supportsImageDetailOriginal: boolean;
+	supportsObfuscationOptOut: boolean;
+	streamIdleTimeoutMs?: number;
 }
+
+/**
+ * OpenRouter is a pseudo API: runtime dispatch can use either Responses
+ * (default) or Chat Completions (`PI_OPENROUTER_RESPONSES=0`) with the same
+ * model object, so its resolved compat must satisfy both handlers.
+ */
+export type ResolvedOpenRouterCompat = ResolvedOpenAICompat & ResolvedOpenAIResponsesCompat;
 
 /** Fully-resolved anthropic-messages compat view (same contract as `ResolvedOpenAICompat`). */
 export type ResolvedAnthropicCompat = Required<AnthropicCompat> & {
@@ -358,37 +601,116 @@ export type ResolvedAnthropicCompat = Required<AnthropicCompat> & {
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
+	/**
+	 * The configured endpoint enforces Anthropic's signature protocol on
+	 * replayed thinking blocks — either the official API itself or a proxy
+	 * that forwards to it (GitHub Copilot, ZenMux, Cloudflare AI Gateway's
+	 * `/anthropic` route, Google Vertex's `publishers/anthropic/…`).
+	 * Downstream transforms strip stale cross-model thinking signatures on
+	 * these endpoints so the signing proxy doesn't 400 with
+	 * `Invalid signature in thinking block` (#4297). Superset of
+	 * {@link officialEndpoint}.
+	 */
+	signingEndpoint: boolean;
 };
+
+/**
+ * Compatibility settings for the devin-agent (Codeium Cascade) API. Cascade
+ * selects reasoning effort only by routing to a sibling model id (the
+ * `thinking.effortRouting` baked by variant-collapse), never by a wire
+ * reasoning/effort field, so the model-thinking deriver must not invent an
+ * effort ladder from identity for these models.
+ */
+export interface DevinCompat {
+	/**
+	 * Trust only explicit `thinking` metadata; never derive a thinking surface
+	 * from model identity. A reasoning model with no explicit routed thinking
+	 * resolves to `thinking: undefined` (`reasoning: true`, no controllable
+	 * effort) instead of a fabricated minimal/low/medium/high ladder.
+	 */
+	trustExplicitThinkingOnly?: boolean;
+}
+
+/** Fully-resolved devin-agent compat view. */
+export type ResolvedDevinCompat = Required<DevinCompat>;
 
 /** Sparse, user-authored compat overrides for a given API (models.json / config vocabulary). */
 export type CompatConfigOf<TApi extends Api> = TApi extends
 	| "openai-completions"
+	| "openrouter"
 	| "openai-responses"
 	| "azure-openai-responses"
 	| "openai-codex-responses"
 	? OpenAICompat
 	: TApi extends "anthropic-messages"
 		? AnthropicCompat
-		: undefined;
+		: TApi extends "devin-agent"
+			? DevinCompat
+			: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
-export type CompatOf<TApi extends Api> = TApi extends "openai-completions"
-	? ResolvedOpenAICompat
-	: TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
-		? ResolvedOpenAIResponsesCompat
-		: TApi extends "anthropic-messages"
-			? ResolvedAnthropicCompat
-			: undefined;
+export type CompatOf<TApi extends Api> = TApi extends "openrouter"
+	? ResolvedOpenRouterCompat
+	: TApi extends "openai-completions"
+		? ResolvedOpenAICompat
+		: TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
+			? ResolvedOpenAIResponsesCompat
+			: TApi extends "anthropic-messages"
+				? ResolvedAnthropicCompat
+				: TApi extends "devin-agent"
+					? ResolvedDevinCompat
+					: undefined;
+
+/** Provider-native compaction endpoint configuration for one model. */
+export interface RemoteCompactionConfig<TApi extends Api = Api> {
+	/** Enables provider-native compaction for providers not enabled by built-in policy. */
+	enabled?: boolean;
+	/** Adapter family used by the configured compaction endpoint. */
+	api?: TApi;
+	/** Absolute V1 compact endpoint URL; when omitted, the adapter derives it from the model base URL. */
+	endpoint?: string;
+	/** Enables Responses-stream V2 compaction for models verified to support `compaction_trigger`. */
+	v2StreamingEnabled?: boolean;
+	/** Absolute Responses-stream endpoint URL for V2 compaction; overrides `streamingEndpoint`. */
+	v2Endpoint?: string;
+	/** Absolute provider streaming endpoint URL used by V2 compaction when no dedicated endpoint is set. */
+	streamingEndpoint?: string;
+	/** Model id sent to the compaction endpoint when it differs from the active model id. */
+	model?: string;
+}
 
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/**
+	 * Model id to send on the wire when it differs from `id`. Used by catalog
+	 * variants that present one upstream model under several local entries —
+	 * e.g. GitHub Copilot long-context variants (`claude-opus-4.7-1m` requests
+	 * upstream `claude-opus-4.7`; the tier is a client-side context budget, not
+	 * a served model id). Providers MUST serialize `requestModelId ?? id`;
+	 * everything local (selection, caching, usage attribution) keys on `id`.
+	 */
+	requestModelId?: string;
 	name: string;
 	api: TApi;
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/**
+	 * Decoder family used for image inputs when it has narrower format support
+	 * than OMP's general image pipeline. `stb` local backends reject WebP.
+	 */
+	imageInputDecoder?: "stb";
+	/**
+	 * Native provider tool-call support. `false` is the only unsupported signal:
+	 * `true` and `undefined` both mean callers may use native tools. Catalog and
+	 * discovery sources should set this sparsely when an upstream explicitly
+	 * reports that native tool calling is unsupported.
+	 */
+	supportsTools?: boolean;
+	/** GitLab Duo Workflow root namespace selected during catalog discovery. */
+	gitlabDuoWorkflowRootNamespaceId?: string;
 	cost: {
 		input: number; // $/million tokens
 		output: number; // $/million tokens
@@ -397,8 +719,8 @@ export interface Model<TApi extends Api = Api> {
 	};
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
-	contextWindow: number;
-	maxTokens: number;
+	contextWindow: number | null;
+	maxTokens: number | null;
 	/**
 	 * When `true`, providers MUST omit `max_output_tokens` (Responses) /
 	 * `max_tokens` / `max_completion_tokens` (Completions) from the outbound
@@ -431,6 +753,10 @@ export interface Model<TApi extends Api = Api> {
 	preferWebsockets?: boolean;
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
+	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */
+	compactionModel?: string;
+	/** Provider-native compaction endpoint configuration. */
+	remoteCompaction?: RemoteCompactionConfig<TApi>;
 	/** Provider-assigned priority value (lower = higher priority). */
 	priority?: number;
 	/** Canonical thinking capability metadata for this model. */
