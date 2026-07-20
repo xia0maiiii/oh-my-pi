@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 `getAuthDbPath()`，支持通过 `OMP_AUTH_DB_PATH` 独立覆盖凭证数据库路径。
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 `OMP_AUTH_DB_PATH`，允许凭证 SQLite 数据库独立于配置、会话和其他 agent 状态复用。
+
+### Changed
+
+- 将默认系统提示词、内置子代理提示词及工具提示词切换为证据驱动的红队安全研究工作流。
+- 将 `web_search` 默认提供商切换为 xAI，并统一通过 SuperGrok OAuth 或 xAI API key 使用 `grok-4.5`；自动模式同样优先 xAI。
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

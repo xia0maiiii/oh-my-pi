@@ -21,7 +21,7 @@ Settings are stored as plain YAML mappings. Every key, its type, default, and en
 | CLI overlay | Any file passed with `--config <file>` | Loaded after global and project settings, for that one process. Repeatable. | Never persisted. |
 | Runtime overrides | In-memory only | Set by dedicated CLI flags (`--model`, `--approval-mode`, …) and feature env vars. | Never persisted. |
 
-`PI_CODING_AGENT_DIR` relocates the `~/.omp/agent` base directory. When it is set, the global `config.yml`, the auth store (`agent.db`), and everything else under the agent directory move with it. Use `omp config path` to print the active agent directory.
+`PI_CODING_AGENT_DIR` relocates the `~/.omp/agent` base directory. When it is set, the global `config.yml`, the default auth store (`agent.db`), and everything else under the agent directory move with it. `OMP_AUTH_DB_PATH` takes precedence for the auth store only, leaving settings, sessions, history, and caches under `PI_CODING_AGENT_DIR`. Use `omp config path` to print the active agent directory.
 
 Native project settings are intentionally scoped to the process working directory's `.omp/` folder — settings discovery does **not** walk ancestor directories looking for the nearest `.omp/`. Other discovery providers (Claude, Codex, Gemini, Cursor, OpenCode) can also contribute project-level settings from their own files; those are read-only from `omp` settings commands and can be turned off by provider id (see [Provider and source disabling](#provider-and-source-disabling)).
 
@@ -625,7 +625,7 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 
 ```yaml
 providers:
-  webSearch: auto
+  webSearch: xai
   image: auto
   fetch: auto
   webSearchGeminiModel: gemini-2.5-flash
@@ -652,7 +652,7 @@ searxng:
 
 | Key | Type | Default | Values / notes |
 |---|---|---|---|
-| `providers.webSearch` | enum | `auto` | `auto` plus the configured search providers (`perplexity`, `gemini`, `anthropic`, `codex`, `zai`, `exa`, `jina`, `kagi`, `tavily`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`). |
+| `providers.webSearch` | enum | `xai` | Defaults to xAI subscription/API-key search with Grok 4.5. `auto` and every provider exposed by the setup UI remain available as explicit overrides. |
 | `providers.webSearchGeminiModel` | string | _(unset)_ | Gemini model ID for Google Search grounding when `web_search` uses Gemini; defaults to `gemini-2.5-flash`, overridden by `GEMINI_SEARCH_MODEL`. |
 | `providers.image` | enum | `auto` | `auto`, `openai`, `antigravity`, `xai`, `gemini`, `openrouter`. |
 | `providers.fetch` | enum | `auto` | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `jina`. |

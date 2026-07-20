@@ -45,14 +45,14 @@ describe("system prompt personality block", () => {
 		const rendered = await render();
 		expect(rendered).toContain("<personality>");
 		expect(rendered).toContain("</personality>");
-		expect(rendered).toContain("terse, evidence-first engineer");
+		expect(rendered).toContain("terse, evidence-first red-team researcher");
 	});
 
 	it("replaces the default spec when a non-default personality is selected", async () => {
 		const rendered = await render("friendly");
 		expect(rendered).toContain("<personality>");
-		expect(rendered).toContain("warm, supportive collaborator");
-		expect(rendered).not.toContain("terse, evidence-first engineer");
+		expect(rendered).toContain("gentle, collaborative red-team researcher");
+		expect(rendered).not.toContain("terse, evidence-first red-team researcher");
 	});
 
 	it('omits the personality block entirely for "none"', async () => {

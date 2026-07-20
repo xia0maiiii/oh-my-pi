@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 支持通过 `OMP_AUTH_DB_PATH` 为本地认证存储和认证代理发现指定独立的凭证 SQLite 数据库。
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed

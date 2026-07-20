@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { AgentStorage, SCHEMA_VERSION } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -58,6 +59,73 @@ describe("AgentStorage SQLite compatibility", () => {
 		expect(readTableSql(dbPath, "settings")).toContain("strftime('%s','now')");
 		expect(readTableSql(dbPath, "model_usage")).not.toContain("unixepoch(");
 		expect(readTableSql(dbPath, "model_usage")).toContain("strftime('%s','now')");
+	});
+
+	it("stores active and disabled credentials in an independent auth database", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-split-auth-");
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		const authDir = path.join(tempDir.path(), "shared");
+		fs.mkdirSync(authDir);
+		if (process.platform !== "win32") fs.chmodSync(authDir, 0o755);
+		const authDbPath = path.join(authDir, "agent.db");
+		const storage = await AgentStorage.open(dbPath, authDbPath);
+
+		const [disabled] = storage.replaceAuthCredentialsForProvider("openai", [
+			{ type: "api_key", key: "disabled-key" },
+		]);
+		storage.deleteAuthCredential(disabled.id, "disabled by test");
+		storage.replaceAuthCredentialsForProvider("anthropic", [{ type: "api_key", key: "active-key" }]);
+		storage.recordModelUsage("openai/gpt-5");
+
+		expect(storage.listAuthCredentials()).toEqual([
+			expect.objectContaining({
+				provider: "anthropic",
+				credential: { type: "api_key", key: "active-key" },
+			}),
+		]);
+		expect(storage.listAuthCredentials(undefined, true)).toEqual([
+			expect.objectContaining({
+				provider: "openai",
+				credential: { type: "api_key", key: "disabled-key" },
+				disabledCause: "disabled by test",
+			}),
+			expect.objectContaining({
+				provider: "anthropic",
+				credential: { type: "api_key", key: "active-key" },
+				disabledCause: null,
+			}),
+		]);
+		expect(storage.getModelUsageOrder()).toEqual(["openai/gpt-5"]);
+		const cacheKey = "mcp_tools:shared-server";
+		storage.setCache(cacheKey, "local-cache", Math.floor(Date.now() / 1000) + 60);
+		expect(storage.getCache(cacheKey)).toBe("local-cache");
+
+		const localDb = new Database(dbPath, { readonly: true });
+		const authDb = new Database(authDbPath, { readonly: true });
+		try {
+			expect(
+				localDb
+					.prepare(
+						"SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'",
+					)
+					.get(),
+			).toEqual({ count: 0 });
+			expect(localDb.prepare("SELECT value FROM cache WHERE key = ?").get(cacheKey)).toEqual({
+				value: "local-cache",
+			});
+			if (process.platform !== "win32") expect(fs.statSync(authDir).mode & 0o777).toBe(0o755);
+			expect(
+				authDb
+					.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'model_usage'")
+					.get(),
+			).toEqual({ count: 0 });
+			expect(authDb.prepare("SELECT COUNT(*) AS count FROM cache WHERE key = ?").get(cacheKey)).toEqual({
+				count: 0,
+			});
+		} finally {
+			localDb.close();
+			authDb.close();
+		}
 	});
 
 	it("migrates legacy settings and model usage schemas away from unixepoch defaults", async () => {

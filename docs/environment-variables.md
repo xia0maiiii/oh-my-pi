@@ -357,6 +357,7 @@ These affect where coding-agent stores data and which process-local settings ove
 | --------------------- | ----------------------------------------------------------------------------- |
 | `PI_CONFIG_DIR`       | Config root dirname under home (default `.omp`)                               |
 | `PI_CODING_AGENT_DIR` | Full override for agent directory (default `~/<PI_CONFIG_DIR or .omp>/agent`) |
+| `OMP_AUTH_DB_PATH`    | Full override for the local credential SQLite database; other agent state remains under `PI_CODING_AGENT_DIR` |
 | `PI_CONFIG_FILES`     | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays |
 | `PWD`                 | Used when matching canonical current working directory in path helpers        |
 

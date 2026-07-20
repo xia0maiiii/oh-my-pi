@@ -194,7 +194,7 @@ describe("AgentSession eager task prelude", () => {
 		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
 		expect(observedCalls[0]?.messageTexts[0]).toContain("delegation is enabled");
-		expect(observedCalls[0]?.messageTexts[0]).toContain("Batch independent slices");
+		expect(observedCalls[0]?.messageTexts[0]).toContain("Batch independent attack surfaces");
 		expect(observedCalls[0]?.messageTexts[0]).toContain("`task`");
 		expect(
 			observedCalls[0]?.messageTexts.filter(text => text.includes("refactor the parser across modules")),

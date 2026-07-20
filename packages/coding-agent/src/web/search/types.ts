@@ -11,6 +11,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description: "Automatically uses the first configured web-search provider",
 	},
 	{
+		value: "xai",
+		label: "xAI",
+		description: "Grok 4.5 web search via xAI Responses API (uses SuperGrok OAuth or XAI_API_KEY)",
+	},
+	{
 		value: "perplexity",
 		label: "Perplexity",
 		description: "Uses auth when configured; explicit selection falls back to anonymous search",
@@ -30,7 +35,6 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "OpenAI",
 		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
 	},
-	{ value: "xai", label: "xAI", description: "Grok web search via xAI Responses API (requires XAI_API_KEY)" },
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 	{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
 	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
@@ -82,6 +86,9 @@ export const SEARCH_PROVIDER_OPTIONS = [
 
 /** Supported web search providers (every option except `auto`). */
 export type SearchProviderId = Exclude<(typeof SEARCH_PROVIDER_OPTIONS)[number]["value"], "auto">;
+
+/** Default provider used before any Settings instance applies an override. */
+export const DEFAULT_SEARCH_PROVIDER = "xai" satisfies SearchProviderId;
 
 /**
  * Auto-resolution priority order. Derived from {@link SEARCH_PROVIDER_OPTIONS}

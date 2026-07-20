@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { discoverAuthStorage, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -55,5 +56,23 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				token: "yml-token",
 			});
 		});
+	});
+
+	test("uses OMP_AUTH_DB_PATH for local credential discovery", async () => {
+		const authDbPath = path.join(agentDir, "shared-auth.db");
+		const seedStore = await SqliteAuthCredentialStore.open(authDbPath);
+		seedStore.upsertAuthCredentialForProvider("shared-provider", { type: "api_key", key: "shared-key" });
+		seedStore.close();
+
+		await withEnv({ ...SUPPRESS_AUTH_BROKER_ENV, OMP_AUTH_DB_PATH: authDbPath }, async () => {
+			const storage = await discoverAuthStorage({ agentDir });
+			try {
+				expect(storage.get("shared-provider")).toEqual({ type: "api_key", key: "shared-key" });
+			} finally {
+				storage.close();
+			}
+		});
+
+		expect(await Bun.file(path.join(agentDir, "agent.db")).exists()).toBe(false);
 	});
 });

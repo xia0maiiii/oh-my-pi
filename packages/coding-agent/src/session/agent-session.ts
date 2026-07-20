@@ -135,7 +135,7 @@ import {
 	extractHttpStatusFromError,
 	extractRetryHint,
 	formatDuration,
-	getAgentDbPath,
+	getAuthDbPath,
 	getInstallId,
 	isBunTestRuntime,
 	isEnoent,
@@ -8814,7 +8814,7 @@ export class AgentSession {
 			if (!this.model) {
 				throw new Error(
 					"No model selected.\n\n" +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
+						`Use /login, set an API key environment variable, or create ${getAuthDbPath()}\n\n` +
 						"Then use /model to select a model.",
 				);
 			}
@@ -8824,7 +8824,7 @@ export class AgentSession {
 			if (!apiKey) {
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+						`Use /login, set an API key environment variable, or create ${getAuthDbPath()}`,
 				);
 			}
 

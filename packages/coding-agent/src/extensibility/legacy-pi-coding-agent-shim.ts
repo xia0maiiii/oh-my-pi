@@ -19,8 +19,8 @@ import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agen
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { Text } from "@oh-my-pi/pi-tui";
 import {
-	getAgentDbPath,
 	getAgentDir,
+	getAuthDbPath,
 	getProjectDir,
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
@@ -1304,7 +1304,7 @@ export async function createAgentSession(
  */
 export class AuthStorage {
 	constructor() {
-		fs.mkdirSync(path.dirname(getAgentDbPath()), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.dirname(getAuthDbPath()), { recursive: true, mode: 0o700 });
 	}
 
 	static create(): AuthStorage {
@@ -1312,7 +1312,7 @@ export class AuthStorage {
 	}
 
 	get(provider: string): AuthCredential | undefined {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		const store = new SqliteAuthCredentialStore(new Database(getAuthDbPath()));
 		try {
 			return store.listAuthCredentials(provider)[0]?.credential;
 		} finally {
@@ -1321,7 +1321,7 @@ export class AuthStorage {
 	}
 
 	set(provider: string, credential: AuthCredential): void {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		const store = new SqliteAuthCredentialStore(new Database(getAuthDbPath()));
 		try {
 			store.upsertAuthCredentialForProvider(provider, credential);
 		} finally {

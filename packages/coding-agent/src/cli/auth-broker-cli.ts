@@ -33,7 +33,7 @@ import {
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getAuthDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import chalk from "chalk";
@@ -127,7 +127,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
-	const dbPath = getAgentDbPath();
+	const dbPath = getAuthDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = new AuthStorage(store);
 	await storage.reload();
@@ -208,7 +208,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	// SQLite store the broker uses.
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 	const ask = (msg: string) => promptLine(rl, `${msg} `);
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await SqliteAuthCredentialStore.open(getAuthDbPath());
 	const storage = new AuthStorage(store);
 	await storage.reload();
 	try {
@@ -252,7 +252,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 					}
 				: undefined),
 		});
-		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
+		process.stdout.write(`\nCredentials saved to ${getAuthDbPath()}\n`);
 	} finally {
 		store.close();
 		rl.close();
@@ -372,7 +372,7 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 
 async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	let providerArg = flags.provider;
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await SqliteAuthCredentialStore.open(getAuthDbPath());
 	try {
 		if (!providerArg) {
 			const stored = store.listProviders();
@@ -631,7 +631,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		return;
 	}
 
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await SqliteAuthCredentialStore.open(getAuthDbPath());
 	try {
 		for (const entry of entries) {
 			store.upsertAuthCredentialForProvider(entry.provider, entry.credential);
@@ -741,7 +741,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	const skipped: MigrateSkip[] = [];
 
 	// 1. Local SQLite rows.
-	const localDbPath = getAgentDbPath();
+	const localDbPath = getAuthDbPath();
 	const localStore = await SqliteAuthCredentialStore.open(localDbPath);
 	const plannedApiKeyProviders = new Set<string>();
 	try {

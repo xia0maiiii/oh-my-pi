@@ -6,6 +6,7 @@ import {
 	setExcludedSearchProviders,
 	setPreferredSearchProvider,
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
+import { DEFAULT_SEARCH_PROVIDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { runSearchCommand } from "../../../src/cli/web-search-cli";
 
@@ -98,7 +99,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	resetSettingsForTest();
-	setPreferredSearchProvider("auto");
+	setPreferredSearchProvider(DEFAULT_SEARCH_PROVIDER);
 	setExcludedSearchProviders([]);
 	process.exitCode = originalExitCode;
 	for (const key of WEB_SEARCH_ENV_KEYS) {

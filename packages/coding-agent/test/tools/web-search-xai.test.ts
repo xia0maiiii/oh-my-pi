@@ -133,7 +133,7 @@ describe("xAI web search provider", () => {
 	});
 
 	it("POSTs the Responses API with bearer auth and xAI web_search tool payload", async () => {
-		const capture = captureFetch({ id: "resp_request", model: "grok-4.3", output_text: "xAI answer" });
+		const capture = captureFetch({ id: "resp_request", model: "grok-4.5", output_text: "xAI answer" });
 
 		await searchXAI({
 			...makeParams(capture.fetchMock),
@@ -149,7 +149,7 @@ describe("xAI web search provider", () => {
 			Authorization: "Bearer test-xai-key",
 		});
 		expect(capture.capturedRequest?.body).toMatchObject({
-			model: "grok-4.3",
+			model: "grok-4.5",
 			input: [
 				{ role: "system", content: "Use web search for current xAI facts." },
 				{ role: "user", content: "latest xAI web search" },
@@ -163,9 +163,9 @@ describe("xAI web search provider", () => {
 	});
 
 	it("uses dedicated xAI OAuth credentials for Responses API bearer auth", async () => {
-		const capture = captureFetch({ id: "resp_xai_oauth", model: "grok-4.3", output_text: "xAI OAuth answer" });
+		const capture = captureFetch({ id: "resp_xai_oauth", model: "grok-4.5", output_text: "xAI OAuth answer" });
 
-		await searchXAI(
+		const response = await searchXAI(
 			makeParams(
 				capture.fetchMock,
 				makeAuthStorage({
@@ -178,10 +178,11 @@ describe("xAI web search provider", () => {
 		expect(capture.capturedRequest?.headers).toMatchObject({
 			Authorization: "Bearer test-xai-oauth-token",
 		});
+		expect(response.authMode).toBe("oauth");
 	});
 
 	it("uses configured xai-oauth endpoint, API key, and headers together", async () => {
-		const capture = captureFetch({ id: "resp_proxy", model: "grok-4.3", output_text: "proxy answer" });
+		const capture = captureFetch({ id: "resp_proxy", model: "grok-4.5", output_text: "proxy answer" });
 
 		await searchXAI({
 			...makeParams(
@@ -203,7 +204,7 @@ describe("xAI web search provider", () => {
 	});
 
 	it("uses a supplied registry's auth storage with its xAI transport", async () => {
-		const capture = captureFetch({ id: "resp_registry", model: "grok-4.3", output_text: "registry answer" });
+		const capture = captureFetch({ id: "resp_registry", model: "grok-4.5", output_text: "registry answer" });
 		const authStorage = makeAuthStorage({
 			"xai-oauth": { key: "registry-proxy-key", kind: "config" },
 		});
@@ -258,7 +259,7 @@ describe("xAI web search provider", () => {
 	it("prefers dedicated xAI OAuth credentials over xAI API keys", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_oauth_priority",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "xAI OAuth answer",
 		});
 
@@ -290,7 +291,7 @@ describe("xAI web search provider", () => {
 	it("routes through xai when only XAI_API_KEY is set and an xai credential exists", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_env_only",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "xAI env answer",
 		});
 		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
@@ -320,7 +321,7 @@ describe("xAI web search provider", () => {
 	it("skips stored xai-oauth API keys when XAI_API_KEY would shadow them", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_env_shadow",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "xAI explicit account answer",
 		});
 		const originalOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
@@ -353,7 +354,7 @@ describe("xAI web search provider", () => {
 	it("falls back to xai when unavailable xai-oauth OAuth resolves to the shared env key", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_oauth_env_fallback",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "xAI explicit account answer",
 		});
 		const authStorage = {
@@ -413,7 +414,7 @@ describe("xAI web search provider", () => {
 	});
 
 	it("omits search_parameters for minimal web_search requests", async () => {
-		const capture = captureFetch({ id: "resp_minimal", model: "grok-4.3", output_text: "minimal xAI answer" });
+		const capture = captureFetch({ id: "resp_minimal", model: "grok-4.5", output_text: "minimal xAI answer" });
 
 		await searchXAI(makeParams(capture.fetchMock));
 
@@ -430,7 +431,7 @@ describe("xAI web search provider", () => {
 		["limit, numSearchResults, and recency", { limit: 0, numSearchResults: 30, recency: "day" }],
 		["oversized numSearchResults", { numSearchResults: 99 }],
 	] as const)("keeps %s local instead of sending xAI search_parameters", async (_caseName, searchParams) => {
-		const capture = captureFetch({ id: "resp_agent_tools", model: "grok-4.3", output_text: "xAI answer" });
+		const capture = captureFetch({ id: "resp_agent_tools", model: "grok-4.5", output_text: "xAI answer" });
 
 		await searchXAI({
 			...makeParams(capture.fetchMock),
@@ -474,7 +475,7 @@ describe("xAI web search provider", () => {
 	it("maps output_text, URL citation annotations, top-level citations, id, model, usage, and auth mode", async () => {
 		const capture = captureFetch({
 			id: "resp_xai_123",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Top-level xAI answer",
 			annotations: [
 				{
@@ -525,7 +526,7 @@ describe("xAI web search provider", () => {
 			provider: "xai",
 			answer: "Top-level xAI answer",
 			requestId: "resp_xai_123",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			authMode: "api_key",
 			usage: {
 				inputTokens: 12,
@@ -581,7 +582,7 @@ describe("xAI web search provider", () => {
 		const urls = citationUrls("default-cap", 12);
 		const capture = captureFetch({
 			id: "resp_default_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Default capped xAI answer",
 			citations: urls,
 		});
@@ -604,7 +605,7 @@ describe("xAI web search provider", () => {
 		const urls = citationUrls("max-cap", 35);
 		const capture = captureFetch({
 			id: "resp_max_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Max capped xAI answer",
 			citations: urls,
 		});
@@ -629,7 +630,7 @@ describe("xAI web search provider", () => {
 	it("caps parsed sources and citations locally without changing Agent Tools request shape", async () => {
 		const capture = captureFetch({
 			id: "resp_local_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "Capped xAI answer",
 			annotations: [
 				{
@@ -697,7 +698,7 @@ describe("xAI web search provider", () => {
 	it("uses numSearchResults before limit for the local xAI output cap", async () => {
 		const capture = captureFetch({
 			id: "resp_num_search_results_cap",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output_text: "numSearchResults capped xAI answer",
 			annotations: [
 				{
@@ -741,7 +742,7 @@ describe("xAI web search provider", () => {
 	it("falls back to output content parts when output_text is absent", async () => {
 		const capture = captureFetch({
 			id: "resp_content_parts",
-			model: "grok-4.3",
+			model: "grok-4.5",
 			output: [
 				{
 					content: [

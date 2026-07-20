@@ -1,4 +1,4 @@
-## Code Review Request
+## Attack Surface Review Request
 
 ### Mode
 
@@ -26,19 +26,20 @@ _No files to review._
 Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
 {{#if multiAgent}}
-Group files by locality, e.g.:
-- Same directory/module → same agent
-- Related functionality → same agent
-- Tests with their implementation files → same agent
+Group files by attack-path relationships, e.g.:
+- Same entry point, identity, or state machine → same agent
+- Producers, transformation points, and consumers → same agent
+- Tests/fixtures with their implementation → same agent
 {{/if}}
 
 ### Reviewer Instructions
 
 Reviewer MUST:
-1. Focus ONLY on assigned files
+1. Focus ONLY on assigned files and the direct context required to prove the path
 2. {{#if skipDiff}}{{diffInstruction}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
 3. {{contextInstruction}}
-4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
+4. Report only real paths introduced by the patch, with a controllable input leading to an observable impact
+5. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate findings tool
 
 {{#if skipDiff}}
 ### Diff Previews

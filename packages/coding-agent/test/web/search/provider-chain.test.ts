@@ -7,7 +7,7 @@ import {
 	setExcludedSearchProviders,
 	setPreferredSearchProvider,
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { DEFAULT_SEARCH_PROVIDER, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 const authStorage = {} as AuthStorage;
 const originalBraveApiKey = process.env.BRAVE_API_KEY;
@@ -33,7 +33,7 @@ function restoreEnv(): void {
 }
 
 afterEach(() => {
-	setPreferredSearchProvider("auto");
+	setPreferredSearchProvider(DEFAULT_SEARCH_PROVIDER);
 	setExcludedSearchProviders([]);
 	restoreEnv();
 });

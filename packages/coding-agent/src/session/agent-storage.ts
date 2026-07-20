@@ -8,7 +8,7 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
-import { AsyncDrain, getAgentDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { AsyncDrain, getAgentDbPath, getAuthDbPath, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -129,9 +129,14 @@ const instances = new Map<string, AgentStorage>();
  */
 export class AgentStorage {
 	#db: Database;
+	#authDb: Database;
 	#authStore: AuthCredentialStore;
+	#usesSeparateAuthDb = false;
 
 	#listSettingsStmt: Statement;
+	#getCacheStmt: Statement;
+	#upsertCacheStmt: Statement;
+	#deleteExpiredCacheStmt: Statement;
 	#upsertModelUsageStmt: Statement;
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
@@ -144,7 +149,7 @@ export class AgentStorage {
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
 
-	private constructor(dbPath: string) {
+	private constructor(dbPath: string, authDbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
 		this.#ensureDir(dbPath);
 		try {
@@ -163,10 +168,37 @@ export class AgentStorage {
 		this.#initializeSchema();
 		this.#hardenPermissions(dbPath);
 
-		// Create AuthCredentialStore with our open database
-		this.#authStore = new SqliteAuthCredentialStore(this.#db);
+		let authDb = this.#db;
+		if (authDbPath !== dbPath) {
+			this.#ensureDir(authDbPath);
+			try {
+				authDb = new Database(authDbPath);
+			} catch (err) {
+				this.#db.close();
+				const errMsg = err instanceof Error ? err.message : String(err);
+				throw new Error(`Failed to open auth database at '${authDbPath}': ${errMsg}`);
+			}
+			this.#usesSeparateAuthDb = true;
+			this.#hardenDbFilePermissions(authDbPath);
+		}
+
+		this.#authDb = authDb;
+		try {
+			this.#authStore = new SqliteAuthCredentialStore(authDb);
+		} catch (error) {
+			if (this.#usesSeparateAuthDb) authDb.close();
+			this.#db.close();
+			throw error;
+		}
 
 		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
+		this.#getCacheStmt = this.#db.prepare(
+			`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`,
+		);
+		this.#upsertCacheStmt = this.#db.prepare(
+			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+		);
+		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
@@ -192,8 +224,9 @@ ON CONFLICT(model_key) DO UPDATE SET
 	}
 
 	/**
-	 * Creates tables if missing and migrates legacy settings.
-	 * AuthCredentialStore handles auth_credentials and cache tables.
+	 * Creates local agent-state tables if missing and migrates legacy settings.
+	 * AuthCredentialStore handles credential and auth-specific tables in the
+	 * independently configurable auth database.
 	 */
 	#initializeSchema(): void {
 		// Install the busy handler BEFORE any lock-taking statement (incl.
@@ -224,6 +257,13 @@ CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cache (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
@@ -358,8 +398,12 @@ FROM model_usage_legacy
 	 * @param dbPath - Path to the SQLite database file (defaults to config path)
 	 * @returns AgentStorage instance for the given path
 	 */
-	static async open(dbPath: string = getAgentDbPath()): Promise<AgentStorage> {
-		const existing = instances.get(dbPath);
+	static async open(
+		dbPath: string = getAgentDbPath(),
+		authDbPath: string = dbPath === getAgentDbPath() ? getAuthDbPath() : dbPath,
+	): Promise<AgentStorage> {
+		const instanceKey = authDbPath === dbPath ? dbPath : `${dbPath}\u0000${authDbPath}`;
+		const existing = instances.get(instanceKey);
 		if (existing) return existing;
 
 		const maxRetries = 4;
@@ -368,8 +412,8 @@ FROM model_usage_legacy
 
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			try {
-				const storage = new AgentStorage(dbPath);
-				instances.set(dbPath, storage);
+				const storage = new AgentStorage(dbPath, authDbPath);
+				instances.set(instanceKey, storage);
 				return storage;
 			} catch (err) {
 				if (!isSqliteBusyError(err)) {
@@ -397,11 +441,15 @@ FROM model_usage_legacy
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
+		this.#getCacheStmt.finalize();
+		this.#upsertCacheStmt.finalize();
+		this.#deleteExpiredCacheStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
-		// closes the shared #db handle — must run after our statements finalize.
+		// closes the database handle it owns.
 		this.#authStore.close();
+		if (this.#usesSeparateAuthDb) this.#db.close();
 	}
 
 	/**
@@ -673,7 +721,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const stmt = this.#db.prepare(
+		const stmt = this.#authDb.prepare(
 			provider
 				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
 				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
@@ -749,21 +797,34 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * Gets a cached value by key. Returns null if not found or expired.
 	 */
 	getCache(key: string): string | null {
-		return this.#authStore.getCache(key);
+		try {
+			const row = this.#getCacheStmt.get(key) as { value?: string } | undefined;
+			return row?.value ?? null;
+		} catch {
+			return null;
+		}
 	}
 
 	/**
 	 * Sets a cached value with expiry time (unix seconds).
 	 */
 	setCache(key: string, value: string, expiresAtSec: number): void {
-		this.#authStore.setCache(key, value, expiresAtSec);
+		try {
+			this.#upsertCacheStmt.run(key, value, expiresAtSec);
+		} catch {
+			// Cache failures must not prevent tool discovery.
+		}
 	}
 
 	/**
 	 * Deletes expired cache entries. Call periodically for cleanup.
 	 */
 	cleanExpiredCache(): void {
-		this.#authStore.cleanExpiredCache();
+		try {
+			this.#deleteExpiredCacheStmt.run();
+		} catch {
+			// Cache cleanup is best-effort.
+		}
 	}
 
 	/**
@@ -795,6 +856,10 @@ ON CONFLICT(model_key) DO UPDATE SET
 			logger.warn("AgentStorage failed to chmod agent dir", { path: dir, error: String(error) });
 		}
 
+		this.#hardenDbFilePermissions(dbPath);
+	}
+
+	#hardenDbFilePermissions(dbPath: string): void {
 		if (!fs.existsSync(dbPath)) return;
 		try {
 			fs.chmodSync(dbPath, 0o600);

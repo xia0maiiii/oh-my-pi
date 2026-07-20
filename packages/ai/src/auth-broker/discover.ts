@@ -6,9 +6,9 @@
  */
 import * as path from "node:path";
 import {
-	getAgentDbPath,
 	getAgentDir,
 	getAuthBrokerSnapshotCachePath,
+	getAuthDbPath,
 	getConfigRootDir,
 	isEnoent,
 	logger,
@@ -235,7 +235,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		return storage;
 	}
 
-	const dbPath = getAgentDbPath(agentDir);
+	const dbPath = getAuthDbPath(agentDir);
 	const storage = await AuthStorage.create(dbPath, {
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,

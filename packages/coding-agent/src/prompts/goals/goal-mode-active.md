@@ -17,7 +17,7 @@ Use the `goal` tool to inspect or complete the active goal:
 
 You MUST keep the full objective intact across turns. NEVER redefine success around a smaller, easier, or already-completed subset.
 
-Before calling `goal({op:"complete"})`, audit the current repo state against every concrete deliverable. Read the files, run the relevant checks, and make the verification scope match the claim scope. If any deliverable lacks direct current-state evidence, keep working.
+Before calling `goal({op:"complete"})`, audit the current state against every concrete deliverable. Read the code, configuration, and artifacts, run the relevant interactions or checks, and make the verification scope match the claim scope. If any finding, attack-chain edge, version judgment, or deliverable lacks direct current-state evidence, keep working.
 
 Budget exhaustion is not completion. If the work is unfinished, leave the goal active.
 </goal_context>

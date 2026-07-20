@@ -330,9 +330,11 @@ describe("setup wizard web search tab", () => {
 		const schema = SETTINGS_SCHEMA["providers.webSearch"];
 		expect(schema.values).toEqual(SEARCH_PROVIDER_PREFERENCES);
 		expect(schema.ui.options).toEqual(SEARCH_PROVIDER_OPTIONS);
+		expect(schema.default).toBe("xai");
+		expect(schema.ui.options[1]?.value).toBe("xai");
 	});
 
-	it("persists the highlighted provider as the web search preference", async () => {
+	it("persists the highlighted provider as the web search preference", () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -345,17 +347,17 @@ describe("setup wizard web search tab", () => {
 			restoreFocus: () => {},
 		} as unknown as SetupSceneHost;
 
+		const options = SETTINGS_SCHEMA["providers.webSearch"].ui.options;
+		const defaultIndex = options.findIndex(option => option.value === settings.get("providers.webSearch"));
+		const expected = options[(defaultIndex + 1) % options.length]!.value;
 		const tab = new WebSearchTab(host);
-		tab.handleInput("\x1b[B"); // move off "auto" to the next provider
-		tab.handleInput("\n"); // confirm the highlighted provider
-		await Bun.sleep(20);
+		tab.handleInput("\x1b[B");
+		tab.handleInput("\n");
 
-		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
-		expect(expected).not.toBe("auto");
 		expect(settings.get("providers.webSearch")).toBe(expected);
 	});
 
-	it("can select the last provider in the setup TUI list", async () => {
+	it("can select the last provider in the setup TUI list", () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -368,12 +370,14 @@ describe("setup wizard web search tab", () => {
 			restoreFocus: () => {},
 		} as unknown as SetupSceneHost;
 
+		const defaultIndex = SEARCH_PROVIDER_OPTIONS.findIndex(
+			option => option.value === settings.get("providers.webSearch"),
+		);
 		const tab = new WebSearchTab(host);
-		for (let i = 1; i < SEARCH_PROVIDER_OPTIONS.length; i++) {
+		for (let index = defaultIndex; index < SEARCH_PROVIDER_OPTIONS.length - 1; index++) {
 			tab.handleInput("\x1b[B");
 		}
 		tab.handleInput("\n");
-		await Bun.sleep(20);
 
 		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
 		expect(settings.get("providers.webSearch")).toBe(lastOption.value);

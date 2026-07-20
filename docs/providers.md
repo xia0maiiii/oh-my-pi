@@ -35,7 +35,7 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 5. **Provider environment variable** — including values loaded from `.env` files (see [the env-var table](#environment-variables-and-env-files)).
 6. **`models.yml` fallback resolver** — keys for custom providers not otherwise registered.
 
-Stored credentials live in the auth store at `~/.omp/agent/agent.db` for local auth, or in the configured auth-broker snapshot when running in broker mode. (`PI_CODING_AGENT_DIR` relocates the `~/.omp/agent` base, and the auth store moves with it.)
+Stored credentials live in the local auth store, which defaults to `~/.omp/agent/agent.db`, or in the configured auth-broker snapshot when running in broker mode. `PI_CODING_AGENT_DIR` relocates the default local path with the rest of the agent directory; `OMP_AUTH_DB_PATH` takes precedence when set and relocates only the credential SQLite database.
 
 ### OAuth vs API key, and provider-scoped logins
 

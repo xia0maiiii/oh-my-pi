@@ -35,7 +35,12 @@ import {
 	TTS_LOCAL_VOICE_VALUES,
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES, type SearchProviderId } from "../web/search/types";
+import {
+	DEFAULT_SEARCH_PROVIDER,
+	SEARCH_PROVIDER_OPTIONS,
+	SEARCH_PROVIDER_PREFERENCES,
+	type SearchProviderId,
+} from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -4435,7 +4440,7 @@ export const SETTINGS_SCHEMA = {
 	"providers.webSearch": {
 		type: "enum",
 		values: SEARCH_PROVIDER_PREFERENCES,
-		default: "auto",
+		default: DEFAULT_SEARCH_PROVIDER,
 		ui: {
 			tab: "providers",
 			group: "Services",

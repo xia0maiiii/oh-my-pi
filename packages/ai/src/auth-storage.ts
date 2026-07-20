@@ -11,7 +11,7 @@ import { Database, type Statement } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { getAuthDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -6221,7 +6221,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 	}
 
-	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {
+	static async open(dbPath: string = getAuthDbPath()): Promise<SqliteAuthCredentialStore> {
 		const dir = path.dirname(dbPath);
 		const dirExists = await fs
 			.stat(dir)

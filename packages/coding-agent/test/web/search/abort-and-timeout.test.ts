@@ -23,6 +23,7 @@ import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/provider
 import { searchBrave } from "@oh-my-pi/pi-coding-agent/web/search/providers/brave";
 import { withHardTimeout } from "@oh-my-pi/pi-coding-agent/web/search/providers/utils";
 import {
+	DEFAULT_SEARCH_PROVIDER,
 	SearchProviderError,
 	type SearchProviderId,
 	type SearchResponse,
@@ -162,7 +163,10 @@ describe("Brave provider hard-timeout wiring", () => {
 });
 
 describe("executeSearch abort propagation", () => {
-	afterEach(() => vi.restoreAllMocks());
+	afterEach(() => {
+		vi.restoreAllMocks();
+		provider.setPreferredSearchProvider(DEFAULT_SEARCH_PROVIDER);
+	});
 
 	function fakeProvider(
 		id: SearchProviderId,
@@ -272,29 +276,28 @@ describe("executeSearch abort propagation", () => {
 		expect(fallbackSearch).not.toHaveBeenCalled();
 	});
 
-	it("does not fall through after an explicitly selected provider fails", async () => {
+	it("uses strict xAI by default before settings initialization", async () => {
 		const fallbackSearch = vi.fn(
 			async (): Promise<SearchResponse> => ({
 				provider: "brave",
 				sources: [{ title: "Hidden fallback", url: "https://example.com/fallback" }],
 			}),
 		);
-		const getProvider = mockProviderChain(
-			[
-				fakeProvider("codex", async () => {
-					throw new SearchProviderError("codex", "Configured Codex endpoint does not support web_search.", 400);
-				}),
-				fakeProvider("brave", fallbackSearch),
-			],
-			{ explicitFirst: true },
-		);
+		const xaiSearch = vi.fn(async () => {
+			throw new SearchProviderError("xai", "Grok 4.5 search failed.", 500);
+		});
+		const getProvider = vi.spyOn(provider, "getSearchProvider").mockImplementation(async id => {
+			if (id === "xai") return fakeProvider("xai", xaiSearch);
+			return fakeProvider("brave", fallbackSearch);
+		});
 
 		const tool = new WebSearchTool(FAKE_SESSION);
 		const result = await tool.execute("test-id", { query: "anything" });
 
-		expect(result.details?.error).toContain("Configured Codex endpoint does not support web_search.");
-		expect(result.details?.response.provider).toBe("codex");
+		expect(result.details?.error).toContain("Grok 4.5 search failed.");
+		expect(result.details?.response.provider).toBe("xai");
 		expect(getProvider).toHaveBeenCalledTimes(1);
+		expect(getProvider).toHaveBeenCalledWith("xai");
 		expect(fallbackSearch).not.toHaveBeenCalled();
 	});
 });

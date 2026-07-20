@@ -8,6 +8,7 @@ import {
 	getActiveProfile,
 	getAgentDbPath,
 	getAgentDir,
+	getAuthDbPath,
 	getConfigAgentDirName,
 	getConfigRootDir,
 	getPythonGatewayDir,
@@ -48,6 +49,7 @@ describe("profile directories", () => {
 	let originalXdgDataHome: string | undefined;
 	let originalXdgStateHome: string | undefined;
 	let originalXdgCacheHome: string | undefined;
+	let originalAuthDbPath: string | undefined;
 
 	beforeEach(async () => {
 		originalAgentDir = getAgentDir();
@@ -59,6 +61,7 @@ describe("profile directories", () => {
 		originalXdgDataHome = process.env.XDG_DATA_HOME;
 		originalXdgStateHome = process.env.XDG_STATE_HOME;
 		originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+		originalAuthDbPath = process.env.OMP_AUTH_DB_PATH;
 		tempRoot = path.join(os.tmpdir(), "pi-utils-profiles", Snowflake.next());
 		configDir = `.omp-profile-test-${Snowflake.next()}`;
 		await fs.mkdir(tempRoot, { recursive: true });
@@ -72,6 +75,7 @@ describe("profile directories", () => {
 		delete process.env.XDG_DATA_HOME;
 		delete process.env.XDG_STATE_HOME;
 		delete process.env.XDG_CACHE_HOME;
+		delete process.env.OMP_AUTH_DB_PATH;
 	});
 
 	afterEach(async () => {
@@ -95,6 +99,11 @@ describe("profile directories", () => {
 			delete process.env.XDG_CACHE_HOME;
 		} else {
 			process.env.XDG_CACHE_HOME = originalXdgCacheHome;
+		}
+		if (originalAuthDbPath === undefined) {
+			delete process.env.OMP_AUTH_DB_PATH;
+		} else {
+			process.env.OMP_AUTH_DB_PATH = originalAuthDbPath;
 		}
 		if (originalProfile) {
 			setProfile(originalProfile);
@@ -129,6 +138,16 @@ describe("profile directories", () => {
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
 		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
+	});
+
+	it("overrides only the credential database path", () => {
+		const authDbPath = path.join(tempRoot, "shared", "agent.db");
+		process.env.OMP_AUTH_DB_PATH = authDbPath;
+		setProfile(undefined);
+
+		expect(getAuthDbPath()).toBe(authDbPath);
+		expect(getAgentDbPath()).toBe(path.join(os.homedir(), configDir, "agent", "agent.db"));
+		expect(getSessionsDir()).toBe(path.join(os.homedir(), configDir, "agent", "sessions"));
 	});
 
 	it("treats the default profile as regular mode", () => {

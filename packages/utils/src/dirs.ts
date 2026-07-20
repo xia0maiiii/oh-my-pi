@@ -730,6 +730,12 @@ export function getAgentDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "agent.db", "data");
 }
 
+/** Get the credential database path, optionally overridden independently from the agent directory. */
+export function getAuthDbPath(agentDir?: string): string {
+	const override = process.env.OMP_AUTH_DB_PATH?.trim();
+	return override ? path.resolve(override) : getAgentDbPath(agentDir);
+}
+
 /** Get the last-seen-changelog-version marker file (~/.omp/agent/last-changelog-version). */
 export function getLastChangelogVersionPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "last-changelog-version", "state");

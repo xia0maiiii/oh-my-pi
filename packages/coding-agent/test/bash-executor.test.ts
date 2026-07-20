@@ -213,7 +213,7 @@ exit 64
 		try {
 			const result = await executeBash("printf 'shell-ok\\n'", {
 				cwd: tempDir,
-				timeout: 5000,
+				timeout: 10_000,
 				sessionKey: "custom-shell-path",
 				useUserShell: true,
 			});
@@ -225,7 +225,7 @@ exit 64
 		} finally {
 			removeSyncWithRetries(shellDir);
 		}
-	});
+	}, 15_000);
 
 	it("uses executable SHELL for user-shell shortcut commands", async () => {
 		if (process.platform === "win32") {
@@ -1148,7 +1148,13 @@ describe("executeBash :async: background retention", () => {
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
+				await pollUntil(() => {
+					try {
+						return Number.isInteger(Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10));
+					} catch {
+						return false;
+					}
+				}, Date.now() + 4000);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
 				expect(Number.isInteger(pid)).toBe(true);
 

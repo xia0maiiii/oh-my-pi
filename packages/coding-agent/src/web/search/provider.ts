@@ -10,7 +10,13 @@
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { SearchProvider } from "./providers/base";
-import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
+import {
+	DEFAULT_SEARCH_PROVIDER,
+	SEARCH_PROVIDER_LABELS,
+	SEARCH_PROVIDER_ORDER,
+	SearchProviderError,
+	type SearchProviderId,
+} from "./types";
 
 export type { SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
@@ -189,8 +195,8 @@ export async function getSearchProvider(id: SearchProviderId): Promise<SearchPro
 	return provider;
 }
 
-/** Preferred provider set via settings (default: auto) */
-let preferredProvId: SearchProviderId | "auto" = "auto";
+/** Preferred provider set via settings. */
+let preferredProvId: SearchProviderId | "auto" = DEFAULT_SEARCH_PROVIDER;
 
 /** Set the preferred web search provider from settings */
 export function setPreferredSearchProvider(provider: SearchProviderId | "auto"): void {

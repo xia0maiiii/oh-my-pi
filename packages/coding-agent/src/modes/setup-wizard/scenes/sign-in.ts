@@ -9,7 +9,7 @@ import {
 	type SgrMouseEvent,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { getAuthDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -230,7 +230,7 @@ export class SignInTab implements SetupTab {
 			if (this.#disposed) return;
 			this.#statusLines = [
 				theme.fg("success", `${theme.status.success} Signed in to ${providerId}`),
-				theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`),
+				theme.fg("dim", `Credentials saved to ${getAuthDbPath()}`),
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;

@@ -9,7 +9,7 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const XAI_WEB_SEARCH_MODEL = "grok-4.3";
+const XAI_WEB_SEARCH_MODEL = "grok-4.5";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
 
@@ -200,7 +200,11 @@ function applyResultCap(
 	};
 }
 
-function parseResponse(response: XAIResponsesResponse, resultCap: number): SearchResponse {
+function parseResponse(
+	response: XAIResponsesResponse,
+	resultCap: number,
+	authMode: "api_key" | "oauth",
+): SearchResponse {
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 	const seenUrls = new Set<string>();
@@ -225,7 +229,7 @@ function parseResponse(response: XAIResponsesResponse, resultCap: number): Searc
 		usage: parseUsage(response.usage),
 		model: response.model,
 		requestId: response.id,
-		authMode: "api_key",
+		authMode,
 	};
 }
 
@@ -301,7 +305,7 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 		signal: params.signal,
 		missingKeyMessage: 'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
 	});
-	return parseResponse(response, resultCap);
+	return parseResponse(response, resultCap, auth.provider === "xai-oauth" ? "oauth" : "api_key");
 }
 
 /** Search provider for xAI web search. */

@@ -115,7 +115,7 @@ describe("AgentSession prewalk", () => {
 		const target = modelOrThrow("claude-sonnet-4-6");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const planMarker = "complete plan in your NEXT reply";
-		const checklistMarker = "grep for every other call site";
+		const checklistMarker = "find every producer, transformation point, and consumer";
 
 		// Turn 1: read-only (nudge injected after). Turn 2: bash — excluded.
 		// Turn 3: todo — opens the gate, must NOT itself switch. Turn 4: write —
